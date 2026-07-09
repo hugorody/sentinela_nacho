@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sentinela · Painel de Câmeras</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">◉</div>
+      <div>
+        <div class="brand-name">Sentinela</div>
+        <div class="brand-sub">vigilância inteligente</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <a class="nav-item active" data-view="cameras">
+        <span class="ic">▤</span> Câmeras
+      </a>
+      <a class="nav-item" data-view="faces">
+        <span class="ic">☺</span> Rostos
+      </a>
+      <a class="nav-item" data-view="events">
+        <span class="ic">◔</span> Eventos <span class="badge" id="evBadge" hidden>0</span>
+      </a>
+    </nav>
+    <div class="side-foot">
+      <div class="status-line">
+        <span class="dot" id="engineDot"></span>
+        <span id="engineState">verificando…</span>
+      </div>
+      <div class="muted" id="engineHw">—</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="topbar">
+      <h1 id="viewTitle">Câmeras</h1>
+      <div class="actions">
+        <button class="btn primary" id="btnToggle">Iniciar streams</button>
+        <button class="btn" id="btnDiscover">Descobrir câmeras</button>
+        <button class="btn" id="btnAdd">+ Adicionar URL</button>
+      </div>
+    </header>
+
+    <!-- View: Câmeras -->
+    <section class="view" id="view-cameras">
+      <div class="grid" id="camGrid"></div>
+      <div class="empty" id="camEmpty" hidden>
+        Nenhuma câmera. Clique em <b>Descobrir câmeras</b> ou <b>+ Adicionar URL</b>.
+      </div>
+    </section>
+
+    <!-- View: Rostos -->
+    <section class="view" id="view-faces" hidden>
+      <div class="subbar">
+        <div class="chips">
+          <span class="chip mode active" data-mode="fotos">Fotos</span>
+          <span class="chip mode" data-mode="grupos">Grupos</span>
+        </div>
+        <button class="btn primary" id="btnEnroll">Atualizar reconhecimento</button>
+      </div>
+
+      <!-- Modo Fotos -->
+      <div id="facesMode">
+        <div class="chips" id="peopleChips" style="margin-bottom:16px"></div>
+        <div class="grid faces" id="faceGrid"></div>
+        <div class="empty" id="faceEmpty" hidden>
+          Nenhum rosto capturado ainda. Inicie os streams e aguarde alguém passar.
+        </div>
+      </div>
+
+      <!-- Modo Grupos -->
+      <div id="clustersMode" hidden>
+        <div class="muted" style="margin-bottom:14px">
+          Rostos parecidos são agrupados automaticamente. Nomeie um grupo inteiro de uma vez.
+        </div>
+        <div class="grid clusters" id="clusterGrid"></div>
+        <div class="empty" id="clusterEmpty" hidden>Nada para agrupar ainda.</div>
+      </div>
+    </section>
+
+    <!-- View: Eventos -->
+    <section class="view" id="view-events" hidden>
+      <div class="subbar">
+        <div class="chips">
+          <span class="chip active" data-filter="all">Todos</span>
+          <span class="chip" data-filter="known">Reconhecidos</span>
+        </div>
+        <span class="muted" id="evCount"></span>
+      </div>
+      <div class="timeline" id="timeline"></div>
+      <div class="empty" id="evEmpty" hidden>Nenhum evento ainda.</div>
+    </section>
+  </main>
+</div>
+
+<!-- Lightbox (câmera ampliada) -->
+<div class="lightbox" id="lightbox" hidden>
+  <div class="lightbox-inner">
+    <div class="lightbox-bar">
+      <span id="lbName"></span>
+      <button class="btn" id="lbClose">✕ Fechar</button>
+    </div>
+    <img id="lbImg" src="" alt="">
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast" hidden></div>
+
+<!-- Modal adicionar câmera -->
+<div class="modal-bg" id="modalAdd" hidden>
+  <div class="modal">
+    <h3>Adicionar câmera</h3>
+    <label>URL RTSP</label>
+    <input id="addUrl" placeholder="rtsp://usuario:senha@192.168.0.10:554/...">
+    <label>Nome (opcional)</label>
+    <input id="addName" placeholder="Ex: Entrada">
+    <div class="modal-actions">
+      <button class="btn" id="addCancel">Cancelar</button>
+      <button class="btn primary" id="addConfirm">Adicionar</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

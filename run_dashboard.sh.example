@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Inicia o dashboard com as cameras Intelbras Mibo.
+# Copie este arquivo para run_dashboard.sh e preencha usuario/senha das cameras.
+# As URLs ficam entre aspas para o shell nao interpretar o '&'.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+python3 mibo_stream.py \
+  --url "rtsp://USUARIO:SENHA@192.168.0.10:554/cam/realmonitor?channel=1&subtype=0" \
+  --name "Cam Sala" \
+  --url "rtsp://USUARIO:SENHA@192.168.0.11:554/cam/realmonitor?channel=1&subtype=0" \
+  --name "Cam Varanda" \
+  "$@"

@@ -1,0 +1,18 @@
+# Ambiente virtual e caches
+venv/
+__pycache__/
+*.pyc
+
+# Credenciais das cameras (use os arquivos .example como base)
+cameras.json
+run_dashboard.sh
+
+# Modelos ONNX (baixar do opencv_zoo, ver README)
+models/*.onnx
+
+# Dados gerados em tempo de execucao
+gravacoes/
+historico_faces/
+
+# Configuracao local do Claude Code
+.claude/settings.local.json

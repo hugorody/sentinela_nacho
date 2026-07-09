@@ -1,0 +1,14 @@
+{
+  "cameras": [
+    {
+      "url": "rtsp://USUARIO:SENHA@192.168.0.10:554/cam/realmonitor?channel=1&subtype=0",
+      "name": "Sala",
+      "ip": "192.168.0.10"
+    },
+    {
+      "url": "rtsp://USUARIO:SENHA@192.168.0.11:554/cam/realmonitor?channel=1&subtype=0",
+      "name": "Varanda",
+      "ip": "192.168.0.11"
+    }
+  ]
+}

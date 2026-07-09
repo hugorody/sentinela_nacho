@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 show *)",
+      "Bash(git config *)",
+      "Bash(gh auth *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git commit -m ' *)",
+      "Read(//home/hugo/.ssh/**)",
+      "Bash(ssh -o BatchMode=yes -o ConnectTimeout=5 -T git@github.com)"
+    ]
+  }
+}
