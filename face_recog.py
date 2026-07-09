@@ -352,6 +352,13 @@ def enroll_from_labels(outdir, known_path=None, detector=None, recognizer=None,
 # entre-pessoas observado (~0.41), para nao fundir pessoas diferentes.
 CLUSTER_THRESHOLD = 0.42
 
+# Sugestao de nome e confirmada por um humano: um falso positivo custa um
+# clique, ja um rosto sem sugestao custa digitacao. Por isso os limiares sao
+# mais permissivos que os de agrupamento/match automatico.
+SUGGEST_MIN_PX = 40          # piso de qualidade para ainda tentar sugerir
+SUGGEST_MIN_SCORE = 0.50
+GROUP_SUGGEST_THRESHOLD = 0.32
+
 
 def _crop_embedding(outdir, rec_row, detector, recognizer):
     img = cv2.imread(str(Path(outdir) / rec_row["file"]))
@@ -389,7 +396,9 @@ def cluster_faces(outdir, detector=None, recognizer=None, threshold=CLUSTER_THRE
     detector = detector or FaceDetector(score_threshold=0.3)
     recognizer = recognizer or FaceRecognizer()
 
-    # Coleta embeddings dos rostos de boa qualidade (evita rostos-lixo).
+    # Coleta embeddings. Rostos de boa qualidade guiam o agrupamento; os de
+    # qualidade baixa (ate um piso) nao movem centroides, mas ainda entram
+    # nos grupos e recebem sugestao — antes ficavam invisiveis no painel.
     items = []
     seen = set()
     for line in hpath.read_text(encoding="utf-8").splitlines():
@@ -403,7 +412,7 @@ def cluster_faces(outdir, detector=None, recognizer=None, threshold=CLUSTER_THRE
         f = r.get("file")
         if not f or f in seen:
             continue
-        if not good_quality(r["box"], r.get("score", 1.0), min_px, min_score):
+        if not good_quality(r["box"], r.get("score", 1.0), SUGGEST_MIN_PX, SUGGEST_MIN_SCORE):
             continue
         emb = _crop_embedding(outdir, r, detector, recognizer)
         if emb is None:
@@ -412,35 +421,57 @@ def cluster_faces(outdir, detector=None, recognizer=None, threshold=CLUSTER_THRE
         items.append({
             "file": f, "emb": emb, "camera": r.get("camera"), "ts": r.get("ts"),
             "name": labels.get(f),
+            "good": good_quality(r["box"], r.get("score", 1.0), min_px, min_score),
             "quality": r.get("score", 0) * min(r["box"][2], r["box"][3]),
         })
 
     # Melhores primeiro: sementes de cluster mais confiaveis.
     items.sort(key=lambda x: x["quality"], reverse=True)
 
-    # Rostos ja nomeados: agrupa pelo NOME (confia no humano), e guarda o
-    # centroide de cada pessoa para sugerir nomes aos grupos sem nome.
+    # Rostos ja nomeados: agrupa pelo NOME (confia no humano). Para comparar,
+    # usa os embeddings INDIVIDUAIS de cada pessoa e pega o maximo: media
+    # (centroide) dilui poses/iluminacoes diferentes e quase nunca passava do
+    # limiar — por isso as sugestoes raramente apareciam.
     named = collections.defaultdict(list)
     unnamed = []
     for it in items:
         (named[it["name"]] if it["name"] else unnamed).append(it)
-    named_centroids = {
-        name: np.mean([x["emb"] for x in members], axis=0)
-        for name, members in named.items()
-    }
+    person_embs = {}
+    for name, members in named.items():
+        good = [m["emb"] for m in members if m["good"]]
+        person_embs[name] = np.array(good or [m["emb"] for m in members],
+                                     dtype=np.float32)
 
-    # Clustering guloso por centroide apenas dos rostos SEM nome.
-    clusters = []
+    def best_person(emb, min_sim):
+        best_name, best_sim = "", min_sim
+        for name, embs in person_embs.items():
+            sim = float(np.max(cosine_sim(emb, embs)))
+            if sim >= best_sim:
+                best_sim, best_name = sim, name
+        return best_name
+
+    # 1) Sugestao direta: rosto sem nome que ja bate com alguem conhecido vai
+    #    para um grupo pendente daquela pessoa (o humano confirma com 1 clique).
+    pending = collections.defaultdict(list)
+    pool = []
     for it in unnamed:
+        who = best_person(it["emb"], SFACE_COSINE_THRESHOLD)
+        (pending[who] if who else pool).append(it)
+
+    # 2) Clustering guloso por centroide dos restantes. So rostos de boa
+    #    qualidade movem o centroide, para nao degradar os grupos.
+    clusters = []
+    for it in pool:
         best, best_sim = None, -1.0
         for c in clusters:
             sim = float(cosine_sim(it["emb"], c["sum"] / c["n"]))
             if sim > best_sim:
                 best_sim, best = sim, c
         if best is not None and best_sim >= threshold:
-            best["sum"] += it["emb"]
-            best["n"] += 1
             best["items"].append(it)
+            if it["good"]:
+                best["sum"] += it["emb"]
+                best["n"] += 1
         else:
             clusters.append({"sum": it["emb"].astype(np.float32).copy(), "n": 1, "items": [it]})
 
@@ -456,17 +487,17 @@ def cluster_faces(outdir, detector=None, recognizer=None, threshold=CLUSTER_THRE
 
     out = []
     gid = 0
-    # Grupos sem nome primeiro (sao os que precisam de acao), com sugestao.
+    # Grupos pendentes primeiro: rostos que ja batem com alguem conhecido.
+    for who, members in sorted(pending.items(), key=lambda kv: -len(kv[1])):
+        out.append(group(members, gid, False, "", who))
+        gid += 1
+    # Depois os grupos sem nome, com sugestao mais permissiva pelo centroide.
     for c in clusters:
         centroid = c["sum"] / c["n"]
-        best_name, best_sim = "", threshold
-        for name, cen in named_centroids.items():
-            sim = float(cosine_sim(centroid, cen))
-            if sim >= best_sim:
-                best_sim, best_name = sim, name
-        out.append(group(c["items"], gid, False, "", best_name))
+        out.append(group(c["items"], gid, False, "",
+                         best_person(centroid, GROUP_SUGGEST_THRESHOLD)))
         gid += 1
-    out.sort(key=lambda g: g["size"], reverse=True)
+    out.sort(key=lambda g: (not g["suggested"], -g["size"]))
 
     # Depois, os grupos ja confirmados (nomeados).
     confirmed = [group(members, gid + i, True, name, name)
