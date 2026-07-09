@@ -24,12 +24,10 @@ Os modelos nao sao versionados no git. Baixe do
 As credenciais das cameras ficam fora do git:
 
 - copie `cameras.json.example` para `cameras.json` e preencha usuario/senha,
-  ou rode `python3 discover.py` para descobrir as cameras na rede;
-- copie `run_dashboard.sh.example` para `run_dashboard.sh` e preencha as URLs.
+  ou rode `python3 discover.py` para descobrir as cameras na rede.
 
 ## Uso
 
 ```bash
-./run_dashboard.sh        # dashboard com as cameras configuradas
-python3 app.py            # servidor Flask
+python3 app.py            # dashboard web em http://localhost:5000
 ```
