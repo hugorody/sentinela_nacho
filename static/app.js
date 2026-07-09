@@ -24,9 +24,10 @@ function setView(v) {
   VIEW = v;
   $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === v));
   $$('.view').forEach(s => s.hidden = (s.id !== 'view-' + v));
-  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos' }[v];
+  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', network: 'Minha rede' }[v];
   if (v === 'faces') loadFaces();
   if (v === 'events') loadEvents();
+  if (v === 'network') loadNetwork();
 }
 $$('.nav-item').forEach(n => n.onclick = () => setView(n.dataset.view));
 
@@ -318,6 +319,43 @@ async function loadEvents() {
     tl.appendChild(row);
   }
 }
+
+/* ---------- Minha rede ---------- */
+const STATE_LABEL = { REACHABLE: 'ativo', STALE: 'ocioso', DELAY: 'ocioso', PROBE: 'ocioso', FAILED: 'sem resposta' };
+
+function netTag(d) {
+  if (d.is_gateway) return '<span class="net-badge router">roteador</span>';
+  if (d.is_camera) return '<span class="net-badge cam">câmera</span>';
+  if (d.is_self) return '<span class="net-badge self">este PC</span>';
+  return '';
+}
+
+async function loadNetwork() {
+  $('#netLoading').hidden = false;
+  $('#netEmpty').hidden = true;
+  $('#netTable').hidden = true;
+  let devs = [];
+  try { devs = (await api('/api/network')).devices || []; }
+  catch { toast('Falha ao escanear a rede', 'err'); }
+  $('#netLoading').hidden = true;
+  $('#netCount').textContent = devs.length + ' dispositivo(s) na rede';
+  $('#netEmpty').hidden = devs.length > 0;
+  $('#netTable').hidden = devs.length === 0;
+  const body = $('#netBody'); body.innerHTML = '';
+  for (const d of devs) {
+    const name = d.hostname || d.vendor || '—';
+    const tr = document.createElement('tr');
+    if (d.is_camera) tr.className = 'is-cam';
+    tr.innerHTML = `
+      <td><b>${name}</b> ${netTag(d)}</td>
+      <td class="mono">${d.ip}</td>
+      <td class="mono muted">${d.mac || '—'}</td>
+      <td>${d.vendor || '—'}</td>
+      <td><span class="net-state ${d.state === 'REACHABLE' ? 'on' : ''}">${STATE_LABEL[d.state] || d.state.toLowerCase()}</span></td>`;
+    body.appendChild(tr);
+  }
+}
+$('#btnNetScan').onclick = loadNetwork;
 
 /* ---------- Loops de atualização ---------- */
 async function updateBadge() {

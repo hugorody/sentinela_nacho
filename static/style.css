@@ -178,3 +178,23 @@ body {
 .modal input { width: 100%; background: #0d1117; border: 1px solid var(--line); color: var(--fg);
   border-radius: 8px; padding: 10px; font-size: 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+/* Minha rede */
+.net-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+.net-table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 640px; }
+.net-table thead th { text-align: left; color: var(--mut); font-weight: 600; font-size: 12px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--panel-2); position: sticky; top: 0; }
+.net-table td { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.net-table tbody tr:last-child td { border-bottom: 0; }
+.net-table tbody tr:hover { background: var(--panel-2); }
+.net-table tr.is-cam { background: var(--acc-dim); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.net-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  margin-left: 6px; border: 1px solid var(--line); color: var(--mut); }
+.net-badge.router { border-color: var(--blue); color: var(--blue); }
+.net-badge.cam { border-color: var(--acc); color: var(--acc); }
+.net-badge.self { border-color: var(--warn); color: var(--warn); }
+.net-state { display: inline-flex; align-items: center; gap: 6px; color: var(--mut); }
+.net-state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--mut); }
+.net-state.on { color: var(--acc); }
+.net-state.on::before { background: var(--acc); }

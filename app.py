@@ -21,6 +21,7 @@ from flask import (Flask, Response, abort, jsonify, render_template,
 import engine as engine_mod
 import face_panel
 import face_recog
+import netscan
 
 FACE_LOG = "./historico_faces"
 CONFIG = "cameras.json"
@@ -77,6 +78,18 @@ def api_add_camera():
         return jsonify({"error": "url obrigatoria"}), 400
     cam = ENGINE.add_manual(url, data.get("name"))
     return jsonify({"ok": bool(cam), "status": ENGINE.status()})
+
+
+# --- Minha rede (dispositivos conectados) ---------------------------------
+
+@app.route("/api/network")
+def api_network():
+    """Lista os dispositivos conectados na rede local."""
+    try:
+        devices = netscan.scan_network(config_path=CONFIG)
+    except Exception as exc:
+        return jsonify({"error": str(exc), "devices": []}), 500
+    return jsonify({"devices": devices, "count": len(devices)})
 
 
 # --- Video ao vivo (MJPEG) ------------------------------------------------

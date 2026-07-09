@@ -27,6 +27,9 @@
       <a class="nav-item" data-view="events">
         <span class="ic">◔</span> Eventos <span class="badge" id="evBadge" hidden>0</span>
       </a>
+      <a class="nav-item" data-view="network">
+        <span class="ic">⧉</span> Minha rede
+      </a>
     </nav>
     <div class="side-foot">
       <div class="status-line">
@@ -96,6 +99,24 @@
       </div>
       <div class="timeline" id="timeline"></div>
       <div class="empty" id="evEmpty" hidden>Nenhum evento ainda.</div>
+    </section>
+
+    <!-- View: Minha rede -->
+    <section class="view" id="view-network" hidden>
+      <div class="subbar">
+        <span class="muted" id="netCount">—</span>
+        <button class="btn primary" id="btnNetScan">Reescanear</button>
+      </div>
+      <div class="net-table-wrap">
+        <table class="net-table" id="netTable">
+          <thead><tr>
+            <th>Dispositivo</th><th>IP</th><th>MAC</th><th>Fabricante</th><th>Estado</th>
+          </tr></thead>
+          <tbody id="netBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="netEmpty" hidden>Nenhum dispositivo encontrado.</div>
+      <div class="empty" id="netLoading" hidden>Escaneando a rede…</div>
     </section>
   </main>
 </div>
