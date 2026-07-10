@@ -205,6 +205,37 @@ body {
 .net-badge.router { border-color: var(--blue); color: var(--blue); }
 .net-badge.cam { border-color: var(--acc); color: var(--acc); }
 .net-badge.self { border-color: var(--warn); color: var(--warn); }
+.net-badge.tuya { border-color: #a78bfa; color: #a78bfa; }
+
+/* --- Smart home --- */
+.sh-bar-actions { display: flex; gap: 8px; }
+.sh-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.sh-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 16px; display: flex; flex-direction: column; gap: 14px; transition: opacity .15s; }
+.sh-card.readonly { opacity: .72; }
+.sh-card.busy { opacity: .55; pointer-events: none; }
+.sh-head { display: flex; align-items: center; gap: 12px; }
+.sh-ic { font-size: 22px; line-height: 1; width: 36px; height: 36px; display: grid;
+  place-items: center; background: var(--panel-2); border-radius: 10px; }
+.sh-title { min-width: 0; }
+.sh-name { font-weight: 600; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sh-sub { font-size: 12px; margin-top: 2px; }
+.sh-online.on { color: var(--acc); }
+.sh-online.off { color: var(--mut); }
+.sh-body { display: flex; flex-direction: column; gap: 10px; }
+.sh-toggle-row, .sh-bright-row { display: flex; align-items: center; gap: 10px; }
+.sh-toggle-label { flex: 1; font-size: 14px; }
+.sh-ch-name { cursor: pointer; border-radius: 6px; padding: 2px 4px; margin: -2px -4px; }
+.sh-ch-name:hover { background: var(--panel-2); }
+.sh-toggle-row .cam-name-input { flex: 1; }
+.sh-toggle { width: 46px; height: 26px; border-radius: 13px; background: var(--panel-2);
+  border: 1px solid var(--line); position: relative; cursor: pointer; padding: 0; flex: none; transition: background .15s; }
+.sh-toggle .knob { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--mut); transition: left .15s, background .15s; }
+.sh-toggle.on { background: var(--acc-dim); border-color: var(--acc); }
+.sh-toggle.on .knob { left: 22px; background: var(--acc); }
+.sh-bright { flex: 1; accent-color: var(--acc); cursor: pointer; }
+.sh-bright-val { font-size: 13px; color: var(--mut); width: 40px; text-align: right; }
 .svc-cell { max-width: 260px; }
 .svc-tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 8px;
   margin: 2px 3px 2px 0; background: var(--panel-2); border: 1px solid var(--line); color: var(--fg); white-space: nowrap; }

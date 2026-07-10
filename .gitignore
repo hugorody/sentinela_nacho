@@ -16,3 +16,15 @@ historico_faces/
 
 # Configuracao local do Claude Code
 .claude/settings.local.json
+
+# Segredos locais
+.env
+
+# Dispositivos smart home descobertos (IDs da sua rede)
+smarthome.json
+
+# Chaves locais dos dispositivos Tuya (local_key)
+tuya_devices.json
+
+# Nomes das teclas dados pelo usuario
+tuya_labels.json

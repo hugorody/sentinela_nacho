@@ -26,10 +26,11 @@ function setView(v) {
   VIEW = v;
   $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === v));
   $$('.view').forEach(s => s.hidden = (s.id !== 'view-' + v));
-  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', network: 'Minha rede' }[v];
+  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', smarthome: 'Smart home', network: 'Minha rede' }[v];
   if (v === 'faces') loadFaces();
   if (v === 'events') loadEvents();
   if (v === 'recordings') loadRecordings();
+  if (v === 'smarthome') loadSmartHome();
   if (v === 'network') loadNetwork();
 }
 $$('.nav-item').forEach(n => n.onclick = () => setView(n.dataset.view));
@@ -379,6 +380,259 @@ async function loadRecordings() {
   }
 }
 $('#btnRecRefresh').onclick = loadRecordings;
+
+/* ---------- Smart home (dispositivos Tuya) ---------- */
+let SH_LOADING = false;
+let SH_DEVICES = [];  // última lista carregada (usada por "acender/apagar tudo")
+
+const SH_KIND_ICON = { switch: '⏻', light: '💡', sensor: '🚪', hub: '⧉' };
+// Nome padrão de uma tecla quando o usuário ainda não a renomeou.
+function chDefault(code, total, kind) {
+  if (total <= 1) return kind === 'light' ? 'Luz' : 'Ligar';
+  const n = code.match(/switch_(\d+)/);
+  return n ? 'Tecla ' + n[1] : code;
+}
+// Nome exibido: o rótulo salvo pelo usuário, ou o padrão.
+function chName(d, code, total) {
+  return (d.labels && d.labels[code]) || chDefault(code, total, d.kind);
+}
+
+function renderSmartHome(devs) {
+  SH_DEVICES = devs;
+  const controllable = devs.filter(d => d.controllable);
+  $('#shCount').textContent = devs.length + ' dispositivo(s) · '
+    + controllable.length + ' controlável(is)';
+  $('#shEmpty').hidden = devs.length > 0;
+  const grid = $('#shGrid'); grid.innerHTML = '';
+  for (const d of devs) {
+    const card = document.createElement('div');
+    card.className = 'sh-card' + (d.controllable ? '' : ' readonly');
+    card.dataset.id = d.id;
+    card.innerHTML = `
+      <div class="sh-head">
+        <span class="sh-ic">${SH_KIND_ICON[d.kind] || '•'}</span>
+        <div class="sh-title">
+          <div class="sh-name" title="Clique para renomear">${esc(d.name || '…' + d.id.slice(-4))}</div>
+          <div class="sh-sub muted">${d.via === 'lan' ? 'Wi-Fi local' : 'via Hub/nuvem'}
+            · <span class="sh-online">—</span></div>
+        </div>
+      </div>
+      <div class="sh-body"><div class="muted sh-loading">carregando…</div></div>`;
+    const nameEl = card.querySelector('.sh-name');
+    nameEl.onclick = () => editShName(d, nameEl);
+    grid.appendChild(card);
+    // Busca o estado de cada dispositivo em paralelo (nao bloqueia a lista).
+    loadDeviceState(d);
+  }
+}
+
+async function loadDeviceState(d) {
+  const card = $(`#shGrid .sh-card[data-id="${d.id}"]`);
+  if (!card) return;
+  let st = {};
+  try { st = await api('/api/smarthome/state/' + encodeURIComponent(d.id)); }
+  catch { st = { online: false, error: 'falha' }; }
+  if (VIEW !== 'smarthome') return;
+  const onlineEl = card.querySelector('.sh-online');
+  onlineEl.textContent = st.online ? 'online' : 'offline';
+  onlineEl.className = 'sh-online ' + (st.online ? 'on' : 'off');
+  renderDeviceBody(card, d, st);
+}
+
+function renderDeviceBody(card, d, st) {
+  const body = card.querySelector('.sh-body');
+  if (!d.controllable) {
+    body.innerHTML = `<div class="muted">${d.kind === 'sensor' ? 'Somente leitura' : 'Sem controle'}</div>`;
+    return;
+  }
+  if (!st.online) {
+    body.innerHTML = `<div class="muted">${esc(st.error || 'sem resposta')}</div>`;
+    return;
+  }
+  const switches = st.switches || {};
+  const codes = Object.keys(switches).sort();
+  body.innerHTML = '';
+  // Um toggle por tecla (interruptores de 1..N seções). O nome da tecla é
+  // clicável para renomear, no mesmo estilo do nome das câmeras.
+  for (const code of codes) {
+    const row = document.createElement('div');
+    row.className = 'sh-toggle-row';
+    const on = !!switches[code];
+    row.innerHTML = `
+      <span class="sh-toggle-label sh-ch-name" title="Clique para renomear"></span>
+      <button class="sh-toggle ${on ? 'on' : ''}" role="switch" aria-checked="${on}">
+        <span class="knob"></span>
+      </button>`;
+    const nameEl = row.querySelector('.sh-ch-name');
+    nameEl.textContent = chName(d, code, codes.length);
+    nameEl.onclick = () => editChName(d, code, codes.length, nameEl);
+    const btn = row.querySelector('.sh-toggle');
+    btn.onclick = () => toggleDevice(d, code, !btn.classList.contains('on'), card);
+    body.appendChild(row);
+  }
+  // Slider de brilho, quando a luz reporta brilho.
+  if (d.kind === 'light' && st.brightness != null) {
+    const row = document.createElement('div');
+    row.className = 'sh-bright-row';
+    row.innerHTML = `
+      <span class="sh-toggle-label">Brilho</span>
+      <input class="sh-bright" type="range" min="1" max="100" value="${st.brightness}">
+      <span class="sh-bright-val">${st.brightness}%</span>`;
+    const slider = row.querySelector('.sh-bright');
+    const val = row.querySelector('.sh-bright-val');
+    slider.oninput = () => { val.textContent = slider.value + '%'; };
+    slider.onchange = () => setBrightness(d, +slider.value);
+    body.appendChild(row);
+  }
+}
+
+async function toggleDevice(d, code, on, card) {
+  const btn = card.querySelector(`.sh-toggle`);
+  card.classList.add('busy');
+  try {
+    const r = await api('/api/smarthome/switch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: d.id, code, on })
+    });
+    if (!r.ok) throw new Error(r.error || 'falha');
+    // Relê o estado real (confirma que o aparelho obedeceu).
+    await loadDeviceState(d);
+  } catch (e) {
+    toast('Falha ao alternar ' + (d.name || 'dispositivo') + (e.message ? ': ' + e.message : ''), 'err');
+    await loadDeviceState(d);
+  }
+  card.classList.remove('busy');
+}
+
+async function setBrightness(d, pct) {
+  try {
+    const r = await api('/api/smarthome/brightness', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: d.id, pct })
+    });
+    if (!r.ok) throw new Error(r.error || 'falha');
+    toast('Brilho de "' + (d.name || 'luz') + '" em ' + pct + '%', 'ok');
+  } catch (e) { toast('Falha ao ajustar brilho', 'err'); }
+}
+
+// Renomeia uma tecla individual (ex.: "Tecla 1" -> "Pia"), no mesmo padrão
+// do nome das câmeras: clica, edita, Enter salva / Esc cancela.
+function editChName(d, code, total, el) {
+  const cur = (d.labels && d.labels[code]) || '';
+  const fallback = chDefault(code, total, d.kind);
+  const input = document.createElement('input');
+  input.className = 'cam-name-input';
+  input.value = cur;
+  input.placeholder = fallback;
+  el.replaceChildren(input);
+  input.focus(); input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const v = input.value.trim();
+    const changed = save && v !== cur;
+    el.textContent = (changed ? v : cur) || fallback;
+    el.onclick = () => editChName(d, code, total, el);
+    if (changed) {
+      try {
+        await api('/api/smarthome/label', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: d.id, code, name: v })
+        });
+        d.labels = d.labels || {};
+        if (v) d.labels[code] = v; else delete d.labels[code];
+        toast(v ? 'Tecla renomeada para "' + v + '"' : 'Nome da tecla removido', 'ok');
+      } catch (e) { toast('Falha ao renomear tecla', 'err'); }
+    }
+  };
+  input.onclick = (e) => e.stopPropagation();
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+function editShName(d, el) {
+  const cur = d.name || '';
+  const input = document.createElement('input');
+  input.className = 'cam-name-input';
+  input.value = cur;
+  el.replaceChildren(input);
+  input.focus(); input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const v = input.value.trim();
+    const changed = save && v && v !== cur;
+    el.textContent = changed ? v : (cur || '…' + d.id.slice(-4));
+    el.onclick = () => editShName(d, el);
+    if (changed) {
+      try {
+        await api('/api/smarthome/rename', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: d.id, name: v })
+        });
+        d.name = v;
+        toast('Dispositivo renomeado para "' + v + '"', 'ok');
+      } catch (e) { toast('Falha ao renomear', 'err'); }
+    }
+  };
+  input.onclick = (e) => e.stopPropagation();
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+async function loadSmartHome() {
+  if (SH_LOADING) return;
+  SH_LOADING = true;
+  $('#shLoading').hidden = false;
+  $('#shEmpty').hidden = true;
+  $('#shNotConfigured').hidden = true;
+  let data = { configured: false, devices: [] };
+  try { data = await api('/api/smarthome/devices'); }
+  catch { toast('Falha ao carregar smart home', 'err'); }
+  $('#shLoading').hidden = true;
+  SH_LOADING = false;
+  if (VIEW !== 'smarthome') return;
+  if (!data.configured) {
+    $('#shNotConfigured').hidden = false;
+    $('#shGrid').innerHTML = '';
+    $('#shCount').textContent = 'controle não configurado';
+    return;
+  }
+  renderSmartHome(data.devices || []);
+}
+$('#btnShScan').onclick = loadSmartHome;
+
+async function setAllLights(on) {
+  const btns = [$('#btnShAllOn'), $('#btnShAllOff')];
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await api('/api/smarthome/all', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on })
+    });
+    let msg = (on ? 'Acendendo' : 'Apagando') + ` ${r.switched} tecla(s)`;
+    if (r.offline) msg += ` · ${r.offline} offline`;
+    if (r.failed) msg += ` · ${r.failed} falha(s)`;
+    toast(msg, r.failed ? 'err' : 'ok');
+  } catch (e) {
+    toast('Falha ao ' + (on ? 'acender' : 'apagar') + ' tudo', 'err');
+  }
+  btns.forEach(b => b.disabled = false);
+  // Reflete o novo estado de cada aparelho nos cards.
+  if (VIEW === 'smarthome') $$('#shGrid .sh-card').forEach(card => {
+    const id = card.dataset.id;
+    const d = SH_DEVICES.find(x => x.id === id);
+    if (d && d.controllable) loadDeviceState(d);
+  });
+}
+$('#btnShAllOn').onclick = () => setAllLights(true);
+$('#btnShAllOff').onclick = () => setAllLights(false);
 
 /* ---------- Minha rede ---------- */
 const STATE_LABEL = { REACHABLE: 'ativo', STALE: 'ocioso', DELAY: 'ocioso', PROBE: 'ocioso', FAILED: 'sem resposta' };

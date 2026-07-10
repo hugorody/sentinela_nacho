@@ -1,3 +1,4 @@
 flask>=3.0
 numpy>=1.26,<2
 opencv-python>=4.8
+cryptography>=41

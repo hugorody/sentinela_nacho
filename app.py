@@ -7,8 +7,8 @@ descobrir cameras na rede, painel de rostos (nomear + treinar reconhecimento) e
 log de eventos ("Hugo na Cam X as Y").
 
 Executar:
-    python3 app.py                      # http://localhost:5000
-    python3 app.py --host 0.0.0.0 --port 5000
+    python3 app.py                      # http://localhost:8001
+    python3 app.py --host 0.0.0.0 --port 8001
 """
 
 import argparse
@@ -24,11 +24,17 @@ import engine as engine_mod
 import face_panel
 import face_recog
 import netscan
+import tuya_control
+import tuya_scan
 
 FACE_LOG = "./historico_faces"
 CONFIG = "cameras.json"
+SMARTHOME = "smarthome.json"
 
 ENGINE = engine_mod.Engine(config_path=CONFIG, face_log=FACE_LOG)
+# Controlador Tuya carregado sob demanda: so existe se tuya_devices.json estiver
+# presente (gerado por tuya_setup.py). Sem ele, a aba mostra so o scan local.
+TUYA = tuya_control.Controller() if Path(tuya_control.DEVICES).exists() else None
 app = Flask(__name__)
 
 
@@ -154,6 +160,86 @@ def api_network():
     return jsonify({"devices": devices, "count": len(devices)})
 
 
+# --- Smart home (dispositivos Tuya) ----------------------------------------
+
+@app.route("/api/smarthome")
+def api_smarthome():
+    """Lista os dispositivos smart home ja conhecidos (sem escutar a rede)."""
+    return jsonify({"devices": tuya_scan.load_devices(SMARTHOME)})
+
+
+@app.post("/api/smarthome/scan")
+def api_smarthome_scan():
+    """Escuta os broadcasts Tuya por ~8s e atualiza/retorna a lista."""
+    try:
+        devices = tuya_scan.scan_and_merge(SMARTHOME)
+    except Exception as exc:
+        return jsonify({"error": str(exc), "devices": []}), 500
+    return jsonify({"devices": devices})
+
+
+@app.post("/api/smarthome/rename")
+def api_smarthome_rename():
+    data = request.get_json(force=True, silent=True) or {}
+    ok = tuya_scan.rename(data.get("id"), data.get("name"), SMARTHOME)
+    return jsonify({"ok": ok})
+
+
+# --- Smart home: controle (liga/desliga/brilho via Tuya) -------------------
+
+@app.route("/api/smarthome/devices")
+def api_smarthome_devices():
+    """Dispositivos controlaveis (Tuya Cloud + local). Vazio se nao configurado."""
+    if TUYA is None:
+        return jsonify({"configured": False, "devices": []})
+    return jsonify({"configured": True, "devices": TUYA.list_devices()})
+
+
+@app.route("/api/smarthome/state/<dev_id>")
+def api_smarthome_state(dev_id):
+    if TUYA is None:
+        return jsonify({"error": "smart home nao configurado"}), 400
+    return jsonify(TUYA.get_state(dev_id))
+
+
+@app.post("/api/smarthome/switch")
+def api_smarthome_switch():
+    if TUYA is None:
+        return jsonify({"error": "smart home nao configurado"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    res = TUYA.set_switch(data.get("id"), data.get("code", "switch_1"),
+                          bool(data.get("on")))
+    return jsonify(res), (200 if res.get("ok") else 502)
+
+
+@app.post("/api/smarthome/brightness")
+def api_smarthome_brightness():
+    if TUYA is None:
+        return jsonify({"error": "smart home nao configurado"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    res = TUYA.set_brightness(data.get("id"), data.get("pct", 100))
+    return jsonify(res), (200 if res.get("ok") else 502)
+
+
+@app.post("/api/smarthome/all")
+def api_smarthome_all():
+    """Acende ('on':true) ou apaga todas as luzes/interruptores de uma vez."""
+    if TUYA is None:
+        return jsonify({"error": "smart home nao configurado"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    return jsonify(TUYA.set_all(bool(data.get("on"))))
+
+
+@app.post("/api/smarthome/label")
+def api_smarthome_label():
+    """Renomeia uma tecla/canal de um dispositivo (ex.: 'switch_1' -> 'Pia')."""
+    if TUYA is None:
+        return jsonify({"error": "smart home nao configurado"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    ok = TUYA.label_channel(data.get("id"), data.get("code"), data.get("name"))
+    return jsonify({"ok": ok})
+
+
 # --- Video ao vivo (MJPEG) ------------------------------------------------
 
 @app.route("/video/<cid>")
@@ -270,17 +356,34 @@ def main():
     ap = argparse.ArgumentParser(description="Dashboard web de cameras")
     ap.add_argument("--host", default="127.0.0.1",
                     help="0.0.0.0 para acessar de outros dispositivos")
-    ap.add_argument("--port", type=int, default=5000)
+    ap.add_argument("--port", type=int, default=8001)
     ap.add_argument("--start", action="store_true",
                     help="ja inicia os streams ao subir")
+    ap.add_argument("--reload", action="store_true",
+                    help="reinicia sozinho ao salvar codigo (desenvolvimento)")
     args = ap.parse_args()
 
     if args.start:
         ENGINE.start()
 
-    print(f"[i] Dashboard em http://{args.host}:{args.port}")
+    print(f"[i] Dashboard em http://{args.host}:{args.port}"
+          + ("  (auto-reload ON)" if args.reload else ""))
     # threaded=True e essencial: cada stream MJPEG segura uma conexao.
-    app.run(host=args.host, port=args.port, threaded=True, debug=False)
+    # Com --reload, o Flask reinicia ao salvar qualquer .py; e observamos
+    # tambem os templates/estaticos, pra editar HTML/JS/CSS refletir na hora
+    # (basta recarregar a pagina). use_reloader liga o watcher; debug fica
+    # ligado junto para dar stack traces uteis durante o desenvolvimento.
+    extra_files = None
+    if args.reload:
+        here = Path(__file__).parent
+        extra_files = [str(p) for p in [
+            *here.glob("templates/*.html"),
+            *here.glob("static/*.js"),
+            *here.glob("static/*.css"),
+        ]]
+    app.run(host=args.host, port=args.port, threaded=True,
+            debug=args.reload, use_reloader=args.reload,
+            extra_files=extra_files)
 
 
 if __name__ == "__main__":

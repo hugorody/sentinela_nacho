@@ -30,6 +30,9 @@
       <a class="nav-item" data-view="recordings">
         <span class="ic">⏺</span> Gravações
       </a>
+      <a class="nav-item" data-view="smarthome">
+        <span class="ic">⌂</span> Smart home
+      </a>
       <a class="nav-item" data-view="network">
         <span class="ic">⧉</span> Minha rede
       </a>
@@ -114,6 +117,29 @@
       <div class="empty" id="recEmpty" hidden>
         Nenhuma gravação ainda. Ligue o <b>● REC</b> em uma câmera para começar a gravar.
       </div>
+    </section>
+
+    <!-- View: Smart home -->
+    <section class="view" id="view-smarthome" hidden>
+      <div class="subbar">
+        <span class="muted" id="shCount">—</span>
+        <div class="sh-bar-actions">
+          <button class="btn" id="btnShAllOn">☀ Acender tudo</button>
+          <button class="btn" id="btnShAllOff">☾ Apagar tudo</button>
+          <button class="btn primary" id="btnShScan">Atualizar</button>
+        </div>
+      </div>
+      <div class="grid sh-grid" id="shGrid"></div>
+      <div class="empty" id="shEmpty" hidden>
+        Nenhum dispositivo smart home encontrado. Aparelhos Tuya (Novadigital,
+        Smart Life…) anunciam presença sozinhos — confira se estão ligados na
+        mesma rede Wi-Fi.
+      </div>
+      <div class="empty" id="shNotConfigured" hidden>
+        Controle não configurado. Rode <code>python3 tuya_setup.py</code> com as
+        credenciais Tuya no <code>.env</code> para habilitar ligar/desligar.
+      </div>
+      <div class="empty" id="shLoading" hidden>Carregando dispositivos…</div>
     </section>
 
     <!-- View: Minha rede -->
