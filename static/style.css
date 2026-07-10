@@ -109,6 +109,9 @@ body {
   animation: recpulse 1.4s ease-in-out infinite; }
 @keyframes recpulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 
+/* Gravações */
+.rec-video { width: 100%; aspect-ratio: 16/9; background: #000; display: block; object-fit: contain; }
+
 /* Faces */
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .chip { background: var(--panel-2); border: 1px solid var(--line); padding: 6px 13px;

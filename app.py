@@ -12,7 +12,9 @@ Executar:
 """
 
 import argparse
+import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 from flask import (Flask, Response, abort, jsonify, render_template,
@@ -94,6 +96,50 @@ def api_record():
     else:
         ENGINE.toggle_recording(cid)
     return jsonify({"ok": True, "status": ENGINE.status()})
+
+
+@app.route("/api/recordings")
+def api_recordings():
+    """Lista os segmentos .mp4 ja gravados, do mais recente para o mais antigo."""
+    rec_dir = Path(ENGINE.rec_dir)
+    items = []
+    if rec_dir.is_dir():
+        for f in rec_dir.glob("*.mp4"):
+            if not f.is_file():
+                continue
+            st = f.stat()
+            # Nome do arquivo: "{camera}_{YYYYMMDD_HHMMSS}.mp4".
+            stem = f.stem
+            camera, ts = stem, None
+            m = re.match(r"^(.*)_(\d{8}_\d{6})$", stem)
+            if m:
+                camera = m.group(1)
+                try:
+                    ts = datetime.strptime(m.group(2), "%Y%m%d_%H%M%S").isoformat()
+                except ValueError:
+                    ts = None
+            items.append({
+                "file": f.name,
+                "camera": camera,
+                "started": ts,
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+            })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return jsonify({"recordings": items})
+
+
+@app.route("/gravacoes/<path:name>")
+def recording_file(name):
+    """Serve um segmento .mp4 gravado (com protecao contra path traversal)."""
+    base = Path(ENGINE.rec_dir).resolve()
+    target = (base / name).resolve()
+    if base not in target.parents:
+        abort(403)
+    if target.suffix.lower() != ".mp4" or not target.is_file():
+        abort(404)
+    # conditional=True habilita Range requests (seek no player de video).
+    return send_file(str(target), conditional=True)
 
 
 # --- Minha rede (dispositivos conectados) ---------------------------------

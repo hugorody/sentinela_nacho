@@ -27,6 +27,9 @@
       <a class="nav-item" data-view="events">
         <span class="ic">◔</span> Eventos <span class="badge" id="evBadge" hidden>0</span>
       </a>
+      <a class="nav-item" data-view="recordings">
+        <span class="ic">⏺</span> Gravações
+      </a>
       <a class="nav-item" data-view="network">
         <span class="ic">⧉</span> Minha rede
       </a>
@@ -99,6 +102,18 @@
       </div>
       <div class="timeline" id="timeline"></div>
       <div class="empty" id="evEmpty" hidden>Nenhum evento ainda.</div>
+    </section>
+
+    <!-- View: Gravações -->
+    <section class="view" id="view-recordings" hidden>
+      <div class="subbar">
+        <span class="muted" id="recCount">—</span>
+        <button class="btn primary" id="btnRecRefresh">Atualizar</button>
+      </div>
+      <div class="grid" id="recGrid"></div>
+      <div class="empty" id="recEmpty" hidden>
+        Nenhuma gravação ainda. Ligue o <b>● REC</b> em uma câmera para começar a gravar.
+      </div>
     </section>
 
     <!-- View: Minha rede -->

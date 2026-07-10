@@ -10,6 +10,8 @@ streaming MJPEG no navegador. E consumido pelo app Flask (app.py).
 
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -36,16 +38,86 @@ def mask_rtsp_url(url):
     return re.sub(r"://([^:/@]+):[^@/]+@", r"://\1:***@", url or "", count=1)
 
 
+_FFMPEG = shutil.which("ffmpeg")
+
+
+class FfmpegWriter:
+    """Grava frames BGR em .mp4 H.264 (avc1) via ffmpeg, tocavel no navegador.
+
+    O VideoWriter do OpenCV neste build so encoda MPEG-4 Part 2 (mp4v), que os
+    navegadores nao reproduzem. Encaminhamos os quadros crus para o ffmpeg do
+    sistema (libx264) pelo stdin. Mesma interface do VideoWriter: write/release.
+    """
+
+    def __init__(self, path, width, height, fps):
+        self.path = str(path)
+        self._ok = False
+        cmd = [
+            _FFMPEG, "-loglevel", "error", "-y",
+            "-f", "rawvideo", "-pix_fmt", "bgr24",
+            "-s", f"{width}x{height}", "-r", f"{fps:g}",
+            "-i", "-",
+            "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            self.path,
+        ]
+        try:
+            self._p = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self._ok = True
+        except OSError:
+            self._p = None
+
+    def isOpened(self):
+        return self._ok and self._p is not None
+
+    def write(self, frame):
+        if not self._ok or self._p is None or self._p.stdin is None:
+            return
+        try:
+            self._p.stdin.write(frame.tobytes())
+        except (BrokenPipeError, ValueError, OSError):
+            self._ok = False
+
+    def release(self):
+        if self._p is None:
+            return
+        try:
+            if self._p.stdin:
+                self._p.stdin.close()
+            self._p.wait(timeout=10)
+        except Exception:
+            self._p.kill()
+        finally:
+            self._p = None
+            self._ok = False
+
+
 def new_writer(width, height, fps, outdir, prefix):
-    """Cria um VideoWriter .mp4 com timestamp no nome. Retorna (writer, path)."""
+    """Cria um writer .mp4 (H.264) com timestamp no nome. Retorna (writer, path).
+
+    Usa ffmpeg (libx264) quando disponivel, gerando video H.264 que toca no
+    navegador. Sem ffmpeg, cai no VideoWriter mp4v do OpenCV (nao toca no
+    navegador, mas ainda grava para players de desktop/VLC).
+    """
     if not fps or fps <= 1 or fps > 60:
         fps = 15.0
+    width = width or 1920
+    height = height or 1080
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = outdir / f"{safe_name(prefix)}_{ts}.mp4"
+    if _FFMPEG:
+        w = FfmpegWriter(path, width, height, fps)
+        if w.isOpened():
+            return w, path
+        w.release()
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    return cv2.VideoWriter(str(path), fourcc, fps, (width or 1920, height or 1080)), path
+    return cv2.VideoWriter(str(path), fourcc, fps, (width, height)), path
 
 
 # --- Log de eventos --------------------------------------------------------

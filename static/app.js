@@ -3,6 +3,8 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const api = async (path, opts) => (await fetch(path, opts)).json();
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 let STATE = { running: false };
 let VIEW = 'cameras';
@@ -24,9 +26,10 @@ function setView(v) {
   VIEW = v;
   $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === v));
   $$('.view').forEach(s => s.hidden = (s.id !== 'view-' + v));
-  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', network: 'Minha rede' }[v];
+  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', network: 'Minha rede' }[v];
   if (v === 'faces') loadFaces();
   if (v === 'events') loadEvents();
+  if (v === 'recordings') loadRecordings();
   if (v === 'network') loadNetwork();
 }
 $$('.nav-item').forEach(n => n.onclick = () => setView(n.dataset.view));
@@ -342,6 +345,40 @@ async function loadEvents() {
     tl.appendChild(row);
   }
 }
+
+/* ---------- Gravações ---------- */
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, n = bytes;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + u[i];
+}
+
+async function loadRecordings() {
+  let recs = [];
+  try { recs = (await api('/api/recordings')).recordings || []; }
+  catch { toast('Falha ao listar gravações', 'err'); }
+  $('#recCount').textContent = recs.length + ' gravação(ões)';
+  $('#recEmpty').hidden = recs.length > 0;
+  const grid = $('#recGrid'); grid.innerHTML = '';
+  for (const r of recs) {
+    const card = document.createElement('div');
+    card.className = 'cam-card';
+    const when = r.started ? fmtDateTime(r.started) : fmtDateTime(r.mtime * 1000);
+    card.innerHTML = `
+      <video class="rec-video" controls preload="metadata" src="/gravacoes/${encodeURIComponent(r.file)}"></video>
+      <div class="cam-foot">
+        <div>
+          <div class="cam-name" style="cursor:default">${esc(r.camera)}</div>
+          <div class="cam-meta">${when}</div>
+        </div>
+        <div class="cam-meta">${fmtSize(r.size)}</div>
+      </div>`;
+    grid.appendChild(card);
+  }
+}
+$('#btnRecRefresh').onclick = loadRecordings;
 
 /* ---------- Minha rede ---------- */
 const STATE_LABEL = { REACHABLE: 'ativo', STALE: 'ocioso', DELAY: 'ocioso', PROBE: 'ocioso', FAILED: 'sem resposta' };
