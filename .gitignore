@@ -31,3 +31,6 @@ tuya_labels.json
 
 # Config de alarmes (e-mails de destino)
 alarms.json
+
+# Cenas/automacoes do usuario
+scenes.json

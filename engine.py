@@ -133,11 +133,13 @@ class EventLogger:
         self._last = {}
         self._lock = threading.Lock()
 
-    def log(self, camera, name, score, frame, box):
-        key = (camera, name or "__desconhecido__")
+    def log(self, camera, name, score, frame, box, alarm=False):
+        # Eventos de alarme sao raros e importantes: nunca sao suprimidos pelo
+        # cooldown (usam uma chave propria) para sempre constarem no log.
+        key = (camera, "__alarme__" if alarm else (name or "__desconhecido__"))
         now = time.time()
         with self._lock:
-            if now - self._last.get(key, 0.0) < self.cooldown:
+            if not alarm and now - self._last.get(key, 0.0) < self.cooldown:
                 return None
             self._last[key] = now
 
@@ -165,6 +167,7 @@ class EventLogger:
             "known": bool(name),
             "score": round(float(score), 3),
             "thumb": thumb_rel,
+            "alarm": bool(alarm),
         }
         self.dir.mkdir(parents=True, exist_ok=True)
         with open(self.jsonl, "a", encoding="utf-8") as fh:
@@ -308,6 +311,9 @@ class Engine:
         self.history = None
         self.events = EventLogger(face_log)
         self.alarms = alarms.AlarmManager()
+        # Callback opcional para eventos de camera: on_camera_event(camera,
+        # name, known). Usado pelas Cenas (automacoes) sem acoplar o engine.
+        self.on_camera_event = None
         self.face_enabled = False
         self.using_gpu = False
 
@@ -439,14 +445,32 @@ class Engine:
                         continue  # ignora rostos de baixa qualidade nos eventos
                     name = f.get("name")
                     if name:
-                        self.events.log(cam["name"], name, f.get("match", 0), frame, f["box"])
+                        rec = self.events.log(cam["name"], name, f.get("match", 0), frame, f["box"])
+                        if rec:  # so dispara cenas quando o evento nao foi suprimido pelo cooldown
+                            self._fire_camera_event(cam["name"], name, known=True)
                     elif "name" in f:  # identificacao ligada, mas desconhecido
-                        self.events.log(cam["name"], None, f.get("score", 0), frame, f["box"])
+                        rec = self.events.log(cam["name"], None, f.get("score", 0), frame, f["box"])
+                        if rec:
+                            self._fire_camera_event(cam["name"], None, known=False)
                         # Alarme: pessoa nao identificada numa camera com alarme
                         # ativo (respeita janela de horario e cooldown internos).
-                        self.alarms.notify_unknown(
-                            cam["name"], frame, f.get("score", 0))
+                        # Se disparou de fato, registra um evento marcado como
+                        # alarme (aparece destacado no log de Eventos).
+                        if self.alarms.notify_unknown(
+                                cam["name"], frame, f.get("score", 0)):
+                            self.events.log(cam["name"], None, f.get("score", 0),
+                                            frame, f["box"], alarm=True)
             time.sleep(0.03)
+
+    def _fire_camera_event(self, camera, name, known):
+        """Repassa um evento de camera para o callback de Cenas (best-effort)."""
+        cb = self.on_camera_event
+        if cb is None:
+            return
+        try:
+            cb(camera, name, known)
+        except Exception as exc:
+            print(f"[engine] on_camera_event falhou: {exc}")
 
     # ---- Saida de video ----
 

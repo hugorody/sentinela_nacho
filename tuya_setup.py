@@ -14,48 +14,60 @@ from pathlib import Path
 
 import tinytuya
 
+import envutil
 import tuya_scan
 
 ENV = ".env"
 OUT = "tuya_devices.json"
 
+# Mantido por compatibilidade (era usado por outros modulos); delega ao envutil.
+load_env = envutil.load_env
 
-def load_env(path=ENV):
-    env = {}
+
+class SyncError(Exception):
+    """Falha esperada ao sincronizar (credencial ausente, erro da nuvem...)."""
+
+
+def _load_existing(path=OUT):
     p = Path(path)
     if not p.exists():
-        return env
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        env[k.strip()] = v.strip()
-    return env
+        return []
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return []
 
 
-def main():
-    env = load_env()
+def sync_devices(env_path=ENV, out_path=OUT, listen_seconds=8.0):
+    """Puxa a lista de dispositivos + local_keys da nuvem Tuya e grava out_path.
+
+    Enriquece com IP/versao real via broadcast local. Retorna um resumo:
+        {devices:[...], count, added:[nomes...], removed:[nomes...]}
+    Lanca SyncError em falhas esperadas (sem credencial, erro de API).
+    """
+    env = envutil.load_env(env_path)
     api_region = env.get("tuya_api_region", "us")
     api_key = env.get("tuya_api_key", "")
     api_secret = env.get("tuya_api_secret", "")
     if not api_key or not api_secret:
-        raise SystemExit("[!] Preencha tuya_api_key e tuya_api_secret no .env")
+        raise SyncError("Credenciais Tuya ausentes. Preencha em Configurações.")
 
     cloud = tinytuya.Cloud(apiRegion=api_region, apiKey=api_key,
                            apiSecret=api_secret)
     if isinstance(cloud.token, dict) and "Error" in cloud.token:
-        raise SystemExit(f"[!] Erro de credencial/regiao: {cloud.token}")
+        raise SyncError(f"Erro de credencial/regiao Tuya: {cloud.token}")
 
     devices = cloud.getdevices(verbose=False)
     if not isinstance(devices, list):
-        raise SystemExit(f"[!] Resposta inesperada da API: {devices}")
+        raise SyncError(f"Resposta inesperada da API Tuya: {devices}")
 
     # A nuvem nao da o IP local nem a versao real do protocolo (costuma vir 3.3
     # como default). Escuta os broadcasts locais para preencher isso nos que
     # estao ligados; o controle local precisa da versao certa (ex.: 3.4).
-    print("[i] escutando a rede local (~8s) para IP/versao dos aparelhos...")
-    local = tuya_scan.listen(duration=8.0)
+    local = tuya_scan.listen(duration=listen_seconds) if listen_seconds else {}
+
+    # Nomes antigos para calcular o que entrou/saiu (feedback ao usuario).
+    before = {d.get("id"): d.get("name", "") for d in _load_existing(out_path)}
 
     out = []
     for d in devices:
@@ -71,13 +83,29 @@ def main():
             "product_name": d.get("product_name", ""),
         })
 
-    Path(OUT).write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
-    print(f"[i] {len(out)} dispositivo(s) salvos em {OUT}:")
-    for d in out:
+    Path(out_path).write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+
+    now_ids = {d["id"] for d in out}
+    added = [d["name"] or d["id"] for d in out if d["id"] not in before]
+    removed = [name or did for did, name in before.items() if did not in now_ids]
+    return {"devices": out, "count": len(out), "added": added, "removed": removed}
+
+
+def main():
+    try:
+        res = sync_devices()
+    except SyncError as exc:
+        raise SystemExit(f"[!] {exc}")
+    print(f"[i] {res['count']} dispositivo(s) salvos em {OUT}:")
+    for d in res["devices"]:
         got_key = "com chave" if d["key"] else "SEM CHAVE"
         loc = f"{d['ip']} v{d['version']}" if d["ip"] else "offline"
         print(f"  {d['name'] or '(sem nome)':28} {d['id']}  "
               f"[{d['category']}]  {got_key}  {loc}")
+    if res["added"]:
+        print(f"[i] novos: {', '.join(res['added'])}")
+    if res["removed"]:
+        print(f"[i] removidos: {', '.join(res['removed'])}")
 
 
 if __name__ == "__main__":

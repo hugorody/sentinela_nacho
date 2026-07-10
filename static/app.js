@@ -9,7 +9,6 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
 let STATE = { running: false };
 let VIEW = 'cameras';
 let EV_FILTER = 'all';
-let camStreamsMounted = new Set();
 
 function toast(msg, kind = '') {
   const t = $('#toast');
@@ -26,13 +25,15 @@ function setView(v) {
   VIEW = v;
   $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === v));
   $$('.view').forEach(s => s.hidden = (s.id !== 'view-' + v));
-  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', alarms: 'Cam alarmes', smarthome: 'Smart home', network: 'Minha rede' }[v];
+  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', alarms: 'Cam alarmes', scenes: 'Cenas', smarthome: 'Smart home', network: 'Minha rede', settings: 'Configurações' }[v];
   if (v === 'faces') loadFaces();
   if (v === 'events') loadEvents();
   if (v === 'recordings') loadRecordings();
   if (v === 'alarms') loadAlarms();
+  if (v === 'scenes') loadScenes();
   if (v === 'smarthome') loadSmartHome();
   if (v === 'network') loadNetwork();
+  if (v === 'settings') loadSettings();
 }
 $$('.nav-item').forEach(n => n.onclick = () => setView(n.dataset.view));
 
@@ -54,7 +55,8 @@ $('#btnToggle').onclick = async () => {
   $('#btnToggle').disabled = true;
   const s = await api(STATE.running ? '/api/stop' : '/api/start', { method: 'POST' });
   $('#btnToggle').disabled = false;
-  camStreamsMounted.clear();
+  // refreshStatus() -> renderCameras() (re)conecta os streams conforme o novo
+  // estado (cada camera online religa sua <img> automaticamente).
   await refreshStatus();
   toast(s.running ? 'Streams iniciados' : 'Streams parados', 'ok');
 };
@@ -71,6 +73,20 @@ $('#btnDiscover').onclick = async () => {
 };
 
 /* ---------- Câmeras ---------- */
+// Conecta (ou reconecta) o stream MJPEG de uma <img>. A URL leva um timestamp
+// para evitar reuso de conexao/cache. Se a conexao cair (onerror), re-tenta uma
+// vez, com um pequeno atraso, enquanto a camera continuar marcada como ativa.
+function mountStream(img, cid) {
+  img.dataset.streaming = cid;
+  const connect = () => { img.src = `/video/${cid}?t=${Date.now()}`; };
+  img.onerror = () => {
+    if (img.dataset.streaming !== cid) return;  // camera saiu do ar; nao insiste
+    clearTimeout(img._retry);
+    img._retry = setTimeout(connect, 1500);
+  };
+  connect();
+}
+
 function renderCameras(cams) {
   const grid = $('#camGrid');
   $('#camEmpty').hidden = cams.length > 0;
@@ -84,7 +100,7 @@ function renderCameras(cams) {
       card.className = 'cam-card'; card.dataset.cam = c.id;
       card.innerHTML = `
         <div class="cam-video">
-          <img src="/video/${c.id}" alt="${c.name}">
+          <img alt="${c.name}">
           <div class="cam-live"></div>
         </div>
         <div class="cam-foot">
@@ -111,6 +127,17 @@ function renderCameras(cams) {
     const card = grid.querySelector(`[data-cam="${c.id}"]`);
     if (!card) continue;
     const online = STATE.running && c.status === 'online';
+    // (Re)conecta o stream MJPEG quando a camera esta online e a <img> ainda
+    // nao esta transmitindo. Cada (re)conexao usa uma URL nova (cache-buster)
+    // para forcar uma conexao fresca -- senao a imagem pode ficar presa no
+    // placeholder de quando o motor estava parado. Fora do ar: solta o stream.
+    const img = card.querySelector('.cam-video img');
+    if (online) {
+      if (img.dataset.streaming !== c.id) mountStream(img, c.id);
+    } else if (img.dataset.streaming) {
+      img.removeAttribute('src');
+      delete img.dataset.streaming;
+    }
     const pill = card.querySelector('.pill');
     pill.className = 'pill ' + c.status; pill.textContent = c.status;
     card.querySelector('.cam-live').innerHTML =
@@ -328,19 +355,22 @@ $$('#view-events .chip').forEach(c => c.onclick = () => {
 async function loadEvents() {
   const q = EV_FILTER === 'known' ? '?known=1' : '';
   const d = await api('/api/events' + q);
-  const evs = d.events;
+  // "Alarmes" filtra no cliente (é um subconjunto dos eventos de desconhecido).
+  const evs = EV_FILTER === 'alarm' ? d.events.filter(e => e.alarm) : d.events;
   $('#evEmpty').hidden = evs.length > 0;
   $('#evCount').textContent = evs.length + ' evento(s)';
   const tl = $('#timeline'); tl.innerHTML = '';
   for (const e of evs) {
     const known = e.known;
+    const alarm = !!e.alarm;
     const row = document.createElement('div');
-    row.className = 'ev ' + (known ? 'known' : 'unknown');
+    row.className = 'ev ' + (known ? 'known' : 'unknown') + (alarm ? ' alarm' : '');
     const who = known ? e.name : 'Desconhecido';
+    const badge = alarm ? '<span class="ev-alarm-badge">🔔 ALARME · e-mail enviado</span>' : '';
     row.innerHTML = `
       ${e.thumb ? `<img class="ev-thumb" src="/media/${encodeURI(e.thumb)}" alt="">` : `<div class="ev-thumb"></div>`}
       <div class="ev-main">
-        <div class="ev-title"><span class="who ${known ? '' : 'unknown'}">${who}</span> na <b>${e.camera}</b></div>
+        <div class="ev-title"><span class="who ${known ? '' : 'unknown'}">${who}</span> na <b>${e.camera}</b> ${badge}</div>
         <div class="ev-sub">${fmtDateTime(e.ts)}${known ? ' · similaridade ' + e.score : ''}</div>
       </div>
       <div class="ev-time">${fmtTime(e.ts)}</div>`;
@@ -500,6 +530,289 @@ $('#btnAlarmEmail').onclick = async () => {
     toast('E-mail de destino salvo', 'ok');
   } catch (e) { toast('Falha ao salvar e-mail', 'err'); }
 };
+
+/* ---------- Cenas (automações) ---------- */
+let SCENE_DATA = { scenes: [], cameras: [], devices: [], smart_ready: false };
+const WEEKDAYS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+
+async function loadScenes() {
+  try { SCENE_DATA = await api('/api/scenes'); }
+  catch { toast('Falha ao carregar cenas', 'err'); }
+  if (VIEW !== 'scenes') return;
+  renderScenes();
+}
+
+function devName(id) {
+  const d = SCENE_DATA.devices.find(x => x.id === id);
+  return d ? (d.name || id) : id;
+}
+
+function codeLabel(deviceId, code) {
+  // Usa o nome que o usuário deu à tecla (labels), senão "Tecla N".
+  const d = SCENE_DATA.devices.find(x => x.id === deviceId);
+  const lbl = d && d.labels && d.labels[code];
+  if (lbl) return lbl;
+  const n = (code || '').match(/switch_(\d+)/);
+  return n ? 'Tecla ' + n[1] : code;
+}
+
+function triggerText(t) {
+  if (t.type === 'schedule') {
+    const days = (t.days && t.days.length) ? t.days.map(d => WEEKDAYS[d]).join(', ') : 'todos os dias';
+    return `⏰ Às ${esc(t.time || '--:--')} · ${days}`;
+  }
+  if (t.type === 'device') {
+    const st = { on: 'ligar', off: 'desligar', any_change: 'mudar' }[t.state] || 'mudar';
+    return `🔌 ${esc(devName(t.device))} · ${esc(codeLabel(t.device, t.code || 'switch_1'))} ao ${st}`;
+  }
+  const cam = (!t.camera || t.camera === '*') ? 'qualquer câmera' : esc(t.camera);
+  const who = { unknown: 'não identificada', known: 'reconhecida', any: 'qualquer pessoa' }[t.event] || 'pessoa';
+  const person = (t.person || '').trim();
+  return `📷 ${cam}: ${person ? esc(person) : who}`;
+}
+
+function actionText(a) {
+  if (a.type === 'all') return (a.on ? 'Acender' : 'Apagar') + ' todos os dispositivos';
+  if (a.type === 'brightness') return `Brilho de ${esc(devName(a.device))} → ${a.pct}%`;
+  if (a.type === 'switch') {
+    // Mostra a tecla quando o dispositivo tem mais de uma (ajuda a distinguir).
+    const multi = deviceCodes(a.device).length > 1;
+    const suffix = multi ? ` · ${esc(codeLabel(a.device, a.code || 'switch_1'))}` : '';
+    return `${a.on ? 'Ligar' : 'Desligar'} ${esc(devName(a.device))}${suffix}`;
+  }
+  return 'ação';
+}
+
+function renderScenes() {
+  const scenes = SCENE_DATA.scenes || [];
+  $('#scenesCount').textContent = scenes.length + ' cena(s)';
+  $('#scenesEmpty').hidden = scenes.length > 0;
+  const grid = $('#scenesGrid'); grid.innerHTML = '';
+  for (const s of scenes) {
+    const card = document.createElement('div');
+    card.className = 'scene-card' + (s.enabled ? '' : ' off');
+    const acts = (s.actions || []).map(a => `<li>${actionText(a)}</li>`).join('');
+    card.innerHTML = `
+      <div class="scene-head">
+        <div class="scene-name">${esc(s.name)}</div>
+        <button class="sh-toggle ${s.enabled ? 'on' : ''}" role="switch" aria-checked="${s.enabled}" title="Ativar/desativar">
+          <span class="knob"></span>
+        </button>
+      </div>
+      <div class="scene-when">${triggerText(s.trigger || {})}</div>
+      <ul class="scene-then">${acts || '<li class="muted">sem ações</li>'}</ul>
+      <div class="scene-foot">
+        <button class="btn small scene-run">▶ Executar</button>
+        <button class="btn small scene-edit">Editar</button>
+        <button class="btn small scene-del">Excluir</button>
+      </div>`;
+    card.querySelector('.sh-toggle').onclick = async (e) => {
+      const on = !e.currentTarget.classList.contains('on');
+      await api('/api/scenes/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.id, enabled: on }) });
+      loadScenes();
+    };
+    card.querySelector('.scene-run').onclick = async (e) => {
+      const b = e.target; b.disabled = true;
+      try {
+        const r = await api('/api/scenes/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.id }) });
+        toast(r.ok ? `Cena executada: ${r.done}/${r.total} ação(ões)` : (r.error || 'Falha'), r.ok ? 'ok' : 'err');
+      } catch { toast('Falha ao executar cena', 'err'); }
+      b.disabled = false;
+    };
+    card.querySelector('.scene-edit').onclick = () => openSceneModal(s);
+    card.querySelector('.scene-del').onclick = async () => {
+      if (!confirm(`Excluir a cena "${s.name}"?`)) return;
+      await api('/api/scenes/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.id }) });
+      loadScenes();
+    };
+    grid.appendChild(card);
+  }
+}
+
+/* ----- Editor de cena (modal) ----- */
+let EDITING_SCENE = null;   // cena em edição (null = nova)
+
+function openSceneModal(scene) {
+  EDITING_SCENE = scene || null;
+  $('#sceneModalTitle').textContent = scene ? 'Editar cena' : 'Nova cena';
+  $('#sceneName').value = scene ? scene.name : '';
+
+  // Câmeras no seletor de gatilho.
+  const camSel = $('#trigCam');
+  camSel.innerHTML = '<option value="*">Qualquer câmera</option>'
+    + SCENE_DATA.cameras.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
+
+  // Dispositivos controláveis no seletor de gatilho por dispositivo.
+  const devSel = $('#trigDev');
+  const ctrlDevs = SCENE_DATA.devices.filter(d => d.controllable);
+  devSel.innerHTML = ctrlDevs.length
+    ? ctrlDevs.map(d => `<option value="${esc(d.id)}">${esc(d.name || d.id)}</option>`).join('')
+    : '<option value="">(smart home não configurado)</option>';
+
+  // Dias da semana (chips).
+  const daysWrap = $('#trigDays'); daysWrap.innerHTML = '';
+  WEEKDAYS.forEach((d, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'day-chip'; chip.dataset.day = i; chip.textContent = d;
+    chip.onclick = () => chip.classList.toggle('on');
+    daysWrap.appendChild(chip);
+  });
+
+  // Preenche a partir da cena (ou padrões).
+  const t = (scene && scene.trigger) || { type: 'camera', event: 'unknown', camera: '*' };
+  $$('input[name="trigType"]').forEach(r => { r.checked = r.value === (t.type || 'camera'); });
+  camSel.value = t.camera || '*';
+  $('#trigEvent').value = t.event || 'unknown';
+  $('#trigPerson').value = t.person || '';
+  $('#trigTime').value = t.time || '18:30';
+  (t.days || []).forEach(d => { const c = daysWrap.querySelector(`[data-day="${d}"]`); if (c) c.classList.add('on'); });
+  // Gatilho de dispositivo: seleciona o device, preenche as teclas e o estado.
+  if (t.type === 'device' && t.device && ctrlDevs.some(d => d.id === t.device)) {
+    devSel.value = t.device;
+  }
+  fillDeviceCodes(devSel.value, t.code);
+  $('#trigDevState').value = t.state || 'on';
+  syncTriggerUI();
+
+  // Ações.
+  $('#sceneActions').innerHTML = '';
+  const acts = (scene && scene.actions) || [];
+  if (acts.length) acts.forEach(addActionRow); else addActionRow();
+
+  $('#modalScene').hidden = false;
+}
+
+function syncTriggerUI() {
+  const type = $$('input[name="trigType"]').find(r => r.checked).value;
+  $('#trigCamera').hidden = type !== 'camera';
+  $('#trigDevice').hidden = type !== 'device';
+  $('#trigSchedule').hidden = type !== 'schedule';
+  $('#trigPersonWrap').hidden = !(type === 'camera' && $('#trigEvent').value === 'known');
+}
+$$('input[name="trigType"]').forEach(r => r.onchange = syncTriggerUI);
+$('#trigEvent').onchange = syncTriggerUI;
+
+// Teclas/canais de um dispositivo. Interruptores expõem TODAS as teclas
+// (switch_1..6), não só as que o usuário nomeou — senão as teclas sem nome
+// ficariam inacessíveis. Os labels só dão nome; qualquer código que apareça
+// neles (ex.: switch_6) também é incluído. Luzes têm uma tecla só.
+function deviceCodes(deviceId) {
+  const d = SCENE_DATA.devices.find(x => x.id === deviceId);
+  const labelCodes = (d && d.labels) ? Object.keys(d.labels) : [];
+  if (d && d.kind === 'light') {
+    return [...new Set(['switch_1', ...labelCodes])].sort();
+  }
+  const base = Array.from({ length: 6 }, (_, i) => 'switch_' + (i + 1));
+  return [...new Set([...base, ...labelCodes])].sort();
+}
+
+// Monta o HTML de um <select> de teclas para um dispositivo.
+function codeOptions(deviceId, selectedCode) {
+  return deviceCodes(deviceId).map(c =>
+    `<option value="${esc(c)}"${c === selectedCode ? ' selected' : ''}>${esc(codeLabel(deviceId, c))}</option>`).join('');
+}
+
+// Preenche o seletor de teclas do GATILHO de dispositivo.
+function fillDeviceCodes(deviceId, selectedCode) {
+  $('#trigDevCode').innerHTML = codeOptions(deviceId, selectedCode);
+}
+$('#trigDev') && ($('#trigDev').onchange = () => fillDeviceCodes($('#trigDev').value));
+
+// Uma linha de ação: tipo + campos dependentes.
+function addActionRow(action) {
+  action = action || { type: 'switch', on: true };
+  const wrap = $('#sceneActions');
+  const row = document.createElement('div');
+  row.className = 'scene-action';
+  const smartOk = SCENE_DATA.smart_ready;
+  const devOpts = SCENE_DATA.devices.filter(d => d.controllable)
+    .map(d => `<option value="${esc(d.id)}">${esc(d.name || d.id)}</option>`).join('');
+  row.innerHTML = `
+    <select class="act-type">
+      <option value="switch">Ligar/desligar dispositivo</option>
+      <option value="brightness">Ajustar brilho</option>
+      <option value="all">Acender/apagar tudo</option>
+    </select>
+    <span class="act-fields"></span>
+    <button class="act-del" title="Remover">✕</button>`;
+  const typeSel = row.querySelector('.act-type');
+  typeSel.value = action.type || 'switch';
+  const fields = row.querySelector('.act-fields');
+
+  const renderFields = () => {
+    const t = typeSel.value;
+    if (!smartOk && t !== 'all') {
+      fields.innerHTML = '<span class="muted">Smart home não configurado</span>';
+      return;
+    }
+    if (t === 'all') {
+      fields.innerHTML = `<select class="act-on"><option value="1">acender</option><option value="0">apagar</option></select>`;
+      fields.querySelector('.act-on').value = action.on === false ? '0' : '1';
+    } else if (t === 'switch') {
+      fields.innerHTML = `<select class="act-dev">${devOpts}</select>
+        <select class="act-code"></select>
+        <select class="act-on"><option value="1">ligar</option><option value="0">desligar</option></select>`;
+      const devEl = fields.querySelector('.act-dev');
+      const codeEl = fields.querySelector('.act-code');
+      if (action.device) devEl.value = action.device;
+      // Preenche as teclas do dispositivo escolhido e refaz ao trocar de device.
+      const refreshCodes = (selected) => { codeEl.innerHTML = codeOptions(devEl.value, selected); };
+      refreshCodes(action.code || 'switch_1');
+      devEl.onchange = () => refreshCodes();
+      fields.querySelector('.act-on').value = action.on === false ? '0' : '1';
+    } else if (t === 'brightness') {
+      fields.innerHTML = `<select class="act-dev">${devOpts}</select>
+        <input class="act-pct" type="number" min="1" max="100" value="${action.pct || 70}"> <span class="muted">%</span>`;
+      if (action.device) fields.querySelector('.act-dev').value = action.device;
+    }
+  };
+  typeSel.onchange = renderFields;
+  renderFields();
+  row.querySelector('.act-del').onclick = () => row.remove();
+  wrap.appendChild(row);
+}
+$('#btnAddAction').onclick = () => addActionRow();
+
+function collectScene() {
+  const type = $$('input[name="trigType"]').find(r => r.checked).value;
+  let trigger;
+  if (type === 'schedule') {
+    const days = $$('#trigDays .day-chip.on').map(c => +c.dataset.day);
+    trigger = { type: 'schedule', time: $('#trigTime').value, days };
+  } else if (type === 'device') {
+    trigger = {
+      type: 'device', device: $('#trigDev').value,
+      code: $('#trigDevCode').value || 'switch_1',
+      state: $('#trigDevState').value,
+    };
+  } else {
+    trigger = { type: 'camera', camera: $('#trigCam').value, event: $('#trigEvent').value };
+    const p = $('#trigPerson').value.trim();
+    if (trigger.event === 'known' && p) trigger.person = p;
+  }
+  const actions = $$('#sceneActions .scene-action').map(row => {
+    const t = row.querySelector('.act-type').value;
+    if (t === 'all') return { type: 'all', on: row.querySelector('.act-on').value === '1' };
+    if (t === 'switch') return { type: 'switch', device: row.querySelector('.act-dev')?.value, code: row.querySelector('.act-code')?.value || 'switch_1', on: row.querySelector('.act-on').value === '1' };
+    if (t === 'brightness') return { type: 'brightness', device: row.querySelector('.act-dev')?.value, pct: +row.querySelector('.act-pct').value };
+    return null;
+  }).filter(Boolean);
+  const scene = { name: $('#sceneName').value.trim() || 'Cena', trigger, actions };
+  if (EDITING_SCENE) scene.id = EDITING_SCENE.id;
+  return scene;
+}
+
+$('#sceneCancel').onclick = () => { $('#modalScene').hidden = true; };
+$('#sceneSave').onclick = async () => {
+  const scene = collectScene();
+  try {
+    await api('/api/scenes/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scene }) });
+    $('#modalScene').hidden = true;
+    toast('Cena salva', 'ok');
+    loadScenes();
+  } catch { toast('Falha ao salvar cena', 'err'); }
+};
+$('#btnSceneNew').onclick = () => openSceneModal(null);
 
 /* ---------- Smart home (dispositivos Tuya) ---------- */
 let SH_LOADING = false;
@@ -728,6 +1041,27 @@ async function loadSmartHome() {
 }
 $('#btnShScan').onclick = loadSmartHome;
 
+// Sincroniza com a nuvem Tuya: importa dispositivos novos da Smart Life.
+// A escuta local (~8s) deixa a operação um pouco lenta — mostramos progresso.
+async function syncSmartHome() {
+  const btns = $$('#btnShSync, #btnShSyncFirst').filter(Boolean);
+  btns.forEach(b => { b.disabled = true; b._old = b.textContent; b.textContent = 'Sincronizando…'; });
+  try {
+    const r = await api('/api/smarthome/sync', { method: 'POST' });
+    if (!r.ok) throw new Error(r.error || 'falha');
+    let msg = `${r.count} dispositivo(s) sincronizado(s)`;
+    if (r.added && r.added.length) msg += ` · novo(s): ${r.added.join(', ')}`;
+    if (r.removed && r.removed.length) msg += ` · removido(s): ${r.removed.join(', ')}`;
+    toast(msg, 'ok');
+    if (VIEW === 'smarthome') loadSmartHome();
+  } catch (e) {
+    toast('Falha ao sincronizar: ' + (e.message || ''), 'err');
+  }
+  btns.forEach(b => { b.disabled = false; b.textContent = b._old || '⟳ Sincronizar'; });
+}
+$('#btnShSync') && ($('#btnShSync').onclick = syncSmartHome);
+$('#btnShSyncFirst') && ($('#btnShSyncFirst').onclick = syncSmartHome);
+
 async function setAllLights(on) {
   const btns = [$('#btnShAllOn'), $('#btnShAllOff')];
   btns.forEach(b => b.disabled = true);
@@ -794,6 +1128,71 @@ async function loadNetwork() {
   }
 }
 $('#btnNetScan').onclick = loadNetwork;
+
+/* ---------- Configurações (credenciais do .env) ---------- */
+let SETTINGS_FIELDS = [];
+
+async function loadSettings() {
+  let data = { fields: [] };
+  try { data = await api('/api/settings'); }
+  catch { toast('Falha ao carregar configurações', 'err'); }
+  if (VIEW !== 'settings') return;
+  SETTINGS_FIELDS = data.fields || [];
+  renderSettings(SETTINGS_FIELDS);
+}
+
+function renderSettings(fields) {
+  const form = $('#settingsForm'); form.innerHTML = '';
+  // Agrupa os campos por seção (E-mail, Smart home…).
+  const groups = {};
+  for (const f of fields) (groups[f.group] = groups[f.group] || []).push(f);
+
+  for (const [group, items] of Object.entries(groups)) {
+    const sec = document.createElement('div');
+    sec.className = 'settings-group';
+    sec.innerHTML = `<h3 class="settings-group-title">${esc(group)}</h3>`;
+    for (const f of items) {
+      const row = document.createElement('div');
+      row.className = 'settings-field';
+      const tip = `<span class="tip" tabindex="0">ⓘ<span class="tip-box">${esc(f.help)}</span></span>`;
+      const status = f.secret && f.set
+        ? '<span class="settings-set">✓ salvo</span>' : '';
+      let control;
+      if (f.type === 'select') {
+        const opts = (f.options || []).map(o =>
+          `<option value="${esc(o.value)}"${o.value === f.value ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
+        control = `<select data-key="${esc(f.key)}">${opts}</select>`;
+      } else {
+        const type = f.secret ? 'password' : 'text';
+        const ph = f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : '';
+        control = `<input type="${type}" data-key="${esc(f.key)}" value="${esc(f.value)}"${ph} autocomplete="off">`;
+      }
+      row.innerHTML = `
+        <label class="settings-lbl">${esc(f.label)} ${tip} ${status}</label>
+        ${control}`;
+      sec.appendChild(row);
+    }
+    form.appendChild(sec);
+  }
+}
+
+$('#btnSettingsSave').onclick = async () => {
+  const values = {};
+  $$('#settingsForm [data-key]').forEach(el => { values[el.dataset.key] = el.value; });
+  const b = $('#btnSettingsSave'); b.disabled = true;
+  $('#settingsMsg').textContent = '';
+  try {
+    const r = await api('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values })
+    });
+    if (!r.ok) throw new Error(r.error || 'falha');
+    const n = (r.updated || []).length;
+    toast(n ? 'Configurações salvas' : 'Nada alterado', 'ok');
+    loadSettings();  // recarrega para remascarar segredos recém-salvos
+  } catch (e) { toast('Falha ao salvar configurações', 'err'); }
+  b.disabled = false;
+};
 
 /* ---------- Loops de atualização ---------- */
 async function updateBadge() {

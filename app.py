@@ -21,11 +21,14 @@ from flask import (Flask, Response, abort, jsonify, render_template,
                    request, send_file)
 
 import engine as engine_mod
+import envutil
 import face_panel
 import face_recog
 import netscan
+import scenes as scenes_mod
 import tuya_control
 import tuya_scan
+import tuya_setup
 
 FACE_LOG = "./historico_faces"
 CONFIG = "cameras.json"
@@ -35,7 +38,75 @@ ENGINE = engine_mod.Engine(config_path=CONFIG, face_log=FACE_LOG)
 # Controlador Tuya carregado sob demanda: so existe se tuya_devices.json estiver
 # presente (gerado por tuya_setup.py). Sem ele, a aba mostra so o scan local.
 TUYA = tuya_control.Controller() if Path(tuya_control.DEVICES).exists() else None
+
+# Cenas (automacoes): usam o Controller para agir e recebem eventos de camera
+# do engine. O scheduler de horario roda num thread proprio.
+SCENES = scenes_mod.SceneManager(controller=TUYA)
+ENGINE.on_camera_event = SCENES.on_camera_event
+SCENES.start()
+
 app = Flask(__name__)
+
+
+# --- Configuracoes (credenciais do .env editaveis pela interface) ----------
+# Cada campo declara: rotulo, se e segredo (mascarado na leitura) e uma ajuda
+# (tooltip) explicando como o usuario obtem aquela chave.
+SETTINGS_FIELDS = [
+    {
+        "key": "resend_api_key", "label": "Resend API Key", "secret": True,
+        "group": "E-mail (alarmes)",
+        "help": "Chave para enviar os e-mails de alarme. Crie uma conta em "
+                "resend.com, va em API Keys > Create API Key e copie o valor "
+                "(comeca com 're_'). O dominio do remetente precisa estar "
+                "verificado em resend.com/domains.",
+    },
+    {
+        "key": "alarm_from", "label": "Remetente dos e-mails", "secret": False,
+        "group": "E-mail (alarmes)",
+        "placeholder": "Sentinela <novidades@news.mundodna.com>",
+        "help": "Endereco 'De' dos e-mails de alarme, no formato "
+                "'Nome <email@seudominio.com>'. O dominio precisa estar "
+                "verificado no Resend. Deixe em branco para usar o padrao.",
+    },
+    {
+        "key": "tuya_api_region", "label": "Tuya · Data center", "secret": False,
+        "group": "Smart home (Tuya)", "type": "select",
+        "options": [
+            {"value": "us", "label": "Western America (us)"},
+            {"value": "eu", "label": "Central Europe (eu)"},
+            {"value": "cn", "label": "China (cn)"},
+            {"value": "in", "label": "India (in)"},
+        ],
+        "help": "Data center onde seu projeto Tuya foi criado. Para contas do "
+                "Brasil no app Smart Life, normalmente e 'Western America'. "
+                "Precisa ser o mesmo escolhido em platform.tuya.com.",
+    },
+    {
+        "key": "tuya_api_key", "label": "Tuya · Access ID", "secret": False,
+        "group": "Smart home (Tuya)",
+        "help": "Access ID (Client ID) do seu projeto na Tuya. Em "
+                "platform.tuya.com abra Cloud > Development > seu projeto > "
+                "aba Overview. Crie o projeto e vincule sua conta do app Smart "
+                "Life em Devices > Link App Account.",
+    },
+    {
+        "key": "tuya_api_secret", "label": "Tuya · Access Secret", "secret": True,
+        "group": "Smart home (Tuya)",
+        "help": "Access Secret (Client Secret) do seu projeto Tuya, ao lado do "
+                "Access ID na aba Overview de platform.tuya.com. Mantenha em "
+                "segredo.",
+    },
+]
+
+_SECRET_MASK = "••••••••"
+
+
+def _mask(value):
+    """Mostra so os ultimos caracteres de um segredo (o resto vira bullets)."""
+    if not value:
+        return ""
+    tail = value[-4:] if len(value) > 8 else ""
+    return _SECRET_MASK + tail
 
 
 @app.route("/")
@@ -195,6 +266,30 @@ def api_smarthome_devices():
     return jsonify({"configured": True, "devices": TUYA.list_devices()})
 
 
+@app.post("/api/smarthome/sync")
+def api_smarthome_sync():
+    """Puxa da nuvem Tuya a lista atual de dispositivos (inclui os novos da
+    Smart Life) e recarrega o controlador. Requer credenciais em Configuracoes."""
+    global TUYA
+    try:
+        res = tuya_setup.sync_devices()
+    except tuya_setup.SyncError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    # Primeira sincronizacao: cria o controlador. Depois: recarrega.
+    if TUYA is None:
+        TUYA = tuya_control.Controller()
+        SCENES.controller = TUYA
+    else:
+        TUYA.reload()
+    return jsonify({
+        "ok": True, "count": res["count"],
+        "added": res["added"], "removed": res["removed"],
+        "devices": TUYA.list_devices(),
+    })
+
+
 @app.route("/api/smarthome/state/<dev_id>")
 def api_smarthome_state(dev_id):
     if TUYA is None:
@@ -277,6 +372,92 @@ def api_alarms_test():
     data = request.get_json(force=True, silent=True) or {}
     res = ENGINE.alarms.send_test(data.get("camera"))
     return jsonify(res), (200 if res.get("ok") else 400)
+
+
+# --- Cenas (automacoes) ----------------------------------------------------
+
+@app.route("/api/scenes")
+def api_scenes():
+    """Cenas + o que ha para montar gatilhos/acoes (cameras e dispositivos)."""
+    cams = [{"id": c["id"], "name": c["name"]} for c in ENGINE.cameras]
+    devices = TUYA.list_devices() if TUYA is not None else []
+    return jsonify({
+        "scenes": SCENES.list_scenes(),
+        "cameras": cams,
+        "devices": devices,
+        "smart_ready": TUYA is not None,
+    })
+
+
+@app.post("/api/scenes/save")
+def api_scenes_save():
+    data = request.get_json(force=True, silent=True) or {}
+    scene = SCENES.save_scene(data.get("scene") or {})
+    return jsonify({"ok": True, "scene": scene})
+
+
+@app.post("/api/scenes/delete")
+def api_scenes_delete():
+    data = request.get_json(force=True, silent=True) or {}
+    ok = SCENES.delete_scene(data.get("id"))
+    return jsonify({"ok": ok})
+
+
+@app.post("/api/scenes/enable")
+def api_scenes_enable():
+    data = request.get_json(force=True, silent=True) or {}
+    ok = SCENES.set_enabled(data.get("id"), bool(data.get("enabled")))
+    return jsonify({"ok": ok})
+
+
+@app.post("/api/scenes/run")
+def api_scenes_run():
+    """Executa manualmente as acoes de uma cena (para testar)."""
+    data = request.get_json(force=True, silent=True) or {}
+    res = SCENES.run_scene(data.get("id"))
+    return jsonify(res), (200 if res.get("ok") else 400)
+
+
+# --- Configuracoes ---------------------------------------------------------
+
+@app.route("/api/settings")
+def api_settings():
+    """Campos de configuracao + valores atuais (segredos vem mascarados)."""
+    env = envutil.load_env()
+    fields = []
+    for f in SETTINGS_FIELDS:
+        raw = env.get(f["key"], "")
+        item = {k: f[k] for k in f if k != "help"}
+        item["help"] = f["help"]
+        item["value"] = _mask(raw) if f.get("secret") else raw
+        item["set"] = bool(raw)          # ja tem valor salvo?
+        fields.append(item)
+    return jsonify({"fields": fields})
+
+
+@app.post("/api/settings")
+def api_settings_save():
+    """Salva no .env. Para segredos, so grava se o valor mudou (nao a mascara)."""
+    data = request.get_json(force=True, silent=True) or {}
+    values = data.get("values") or {}
+    by_key = {f["key"]: f for f in SETTINGS_FIELDS}
+    updates = {}
+    for key, val in values.items():
+        f = by_key.get(key)
+        if f is None:
+            continue
+        val = (val or "").strip()
+        # Campo secreto que voltou mascarado (usuario nao mexeu): mantem o atual.
+        if f.get("secret") and (val == "" or val.startswith(_SECRET_MASK)):
+            continue
+        updates[key] = val
+    if updates:
+        envutil.save_env(updates)
+        # Se mudou algo do Tuya, recarrega o controlador para usar as novas
+        # credenciais na proxima chamada a nuvem.
+        if TUYA is not None and any(k.startswith("tuya_") for k in updates):
+            TUYA.reload()
+    return jsonify({"ok": True, "updated": sorted(updates.keys())})
 
 
 # --- Video ao vivo (MJPEG) ------------------------------------------------

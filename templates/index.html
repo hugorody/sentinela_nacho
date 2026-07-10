@@ -33,11 +33,17 @@
       <a class="nav-item" data-view="alarms">
         <span class="ic">◈</span> Cam alarmes
       </a>
+      <a class="nav-item" data-view="scenes">
+        <span class="ic">❖</span> Cenas
+      </a>
       <a class="nav-item" data-view="smarthome">
         <span class="ic">⌂</span> Smart home
       </a>
       <a class="nav-item" data-view="network">
         <span class="ic">⧉</span> Minha rede
+      </a>
+      <a class="nav-item" data-view="settings">
+        <span class="ic">⚙</span> Configurações
       </a>
     </nav>
     <div class="side-foot">
@@ -103,6 +109,7 @@
         <div class="chips">
           <span class="chip active" data-filter="all">Todos</span>
           <span class="chip" data-filter="known">Reconhecidos</span>
+          <span class="chip" data-filter="alarm">Alarmes</span>
         </div>
         <span class="muted" id="evCount"></span>
       </div>
@@ -141,6 +148,22 @@
       </div>
     </section>
 
+    <!-- View: Cenas -->
+    <section class="view" id="view-scenes" hidden>
+      <div class="subbar">
+        <span class="muted" id="scenesCount">—</span>
+        <button class="btn primary" id="btnSceneNew">+ Nova cena</button>
+      </div>
+      <p class="muted" style="margin:0 0 14px">
+        Automatize sua casa: <b>quando</b> algo acontecer (uma câmera ver alguém,
+        ou chegar um horário), <b>então</b> execute ações nos dispositivos.
+      </p>
+      <div class="grid scenes-grid" id="scenesGrid"></div>
+      <div class="empty" id="scenesEmpty" hidden>
+        Nenhuma cena ainda. Clique em <b>+ Nova cena</b> para criar sua primeira automação.
+      </div>
+    </section>
+
     <!-- View: Smart home -->
     <section class="view" id="view-smarthome" hidden>
       <div class="subbar">
@@ -148,6 +171,7 @@
         <div class="sh-bar-actions">
           <button class="btn" id="btnShAllOn">☀ Acender tudo</button>
           <button class="btn" id="btnShAllOff">☾ Apagar tudo</button>
+          <button class="btn" id="btnShSync" title="Buscar dispositivos novos adicionados na Smart Life">⟳ Sincronizar</button>
           <button class="btn primary" id="btnShScan">Atualizar</button>
         </div>
       </div>
@@ -158,8 +182,10 @@
         mesma rede Wi-Fi.
       </div>
       <div class="empty" id="shNotConfigured" hidden>
-        Controle não configurado. Rode <code>python3 tuya_setup.py</code> com as
-        credenciais Tuya no <code>.env</code> para habilitar ligar/desligar.
+        Controle não configurado. Preencha as credenciais Tuya em
+        <b>Configurações</b> e clique em <b>⟳ Sincronizar</b> para importar seus
+        dispositivos da Smart Life.
+        <div style="margin-top:12px"><button class="btn primary" id="btnShSyncFirst">⟳ Sincronizar agora</button></div>
       </div>
       <div class="empty" id="shLoading" hidden>Carregando dispositivos…</div>
     </section>
@@ -180,6 +206,20 @@
       </div>
       <div class="empty" id="netEmpty" hidden>Nenhum dispositivo encontrado.</div>
       <div class="empty" id="netLoading" hidden>Escaneando a rede…</div>
+    </section>
+
+    <!-- View: Configurações -->
+    <section class="view" id="view-settings" hidden>
+      <p class="muted" style="margin:0 0 16px">
+        Credenciais usadas pelo painel. Ficam salvas localmente no arquivo
+        <code>.env</code> (nunca vão para o Git). Passe o mouse sobre o
+        <span class="tip-mark">ⓘ</span> de cada campo para saber como obtê-lo.
+      </p>
+      <form id="settingsForm" class="settings"></form>
+      <div class="settings-actions">
+        <button class="btn primary" id="btnSettingsSave">Salvar configurações</button>
+        <span class="muted" id="settingsMsg"></span>
+      </div>
     </section>
   </main>
 </div>
@@ -209,6 +249,92 @@
     <div class="modal-actions">
       <button class="btn" id="addCancel">Cancelar</button>
       <button class="btn primary" id="addConfirm">Adicionar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal editor de cena -->
+<div class="modal-bg" id="modalScene" hidden>
+  <div class="modal modal-scene">
+    <h3 id="sceneModalTitle">Nova cena</h3>
+    <label>Nome</label>
+    <input id="sceneName" placeholder="Ex: Chegou alguém desconhecido">
+
+    <h4 class="scene-section">Quando (gatilho)</h4>
+    <div class="scene-trig-type">
+      <label class="radio"><input type="radio" name="trigType" value="camera" checked> Evento de câmera</label>
+      <label class="radio"><input type="radio" name="trigType" value="device"> Dispositivo smart</label>
+      <label class="radio"><input type="radio" name="trigType" value="schedule"> Horário</label>
+    </div>
+
+    <!-- Gatilho: câmera -->
+    <div id="trigCamera" class="scene-trig-body">
+      <div class="scene-row">
+        <div class="scene-col">
+          <label>Câmera</label>
+          <select id="trigCam"></select>
+        </div>
+        <div class="scene-col">
+          <label>Quem</label>
+          <select id="trigEvent">
+            <option value="unknown">Pessoa não identificada</option>
+            <option value="known">Pessoa reconhecida</option>
+            <option value="any">Qualquer pessoa</option>
+          </select>
+        </div>
+      </div>
+      <div id="trigPersonWrap" hidden>
+        <label>Pessoa específica (opcional)</label>
+        <input id="trigPerson" placeholder="Nome cadastrado; vazio = qualquer reconhecido">
+      </div>
+    </div>
+
+    <!-- Gatilho: dispositivo smart -->
+    <div id="trigDevice" class="scene-trig-body" hidden>
+      <div class="scene-row">
+        <div class="scene-col">
+          <label>Dispositivo</label>
+          <select id="trigDev"></select>
+        </div>
+        <div class="scene-col">
+          <label>Tecla / canal</label>
+          <select id="trigDevCode"></select>
+        </div>
+        <div class="scene-col">
+          <label>Quando</label>
+          <select id="trigDevState">
+            <option value="on">Ligar</option>
+            <option value="off">Desligar</option>
+            <option value="any_change">Mudar (liga ou desliga)</option>
+          </select>
+        </div>
+      </div>
+      <p class="muted" id="trigDevHint" style="margin:6px 0 0">
+        O estado é verificado a cada ~6 segundos; a cena dispara na mudança.
+      </p>
+    </div>
+
+    <!-- Gatilho: horário -->
+    <div id="trigSchedule" class="scene-trig-body" hidden>
+      <div class="scene-row">
+        <div class="scene-col">
+          <label>Horário</label>
+          <input id="trigTime" type="time" value="18:30">
+        </div>
+        <div class="scene-col">
+          <label>Dias <span class="muted">(nenhum = todos)</span></label>
+          <div class="scene-days" id="trigDays"></div>
+        </div>
+      </div>
+    </div>
+
+    <h4 class="scene-section">Então (ações)</h4>
+    <div id="sceneActions" class="scene-actions-list"></div>
+    <button class="btn small" id="btnAddAction">+ Adicionar ação</button>
+
+    <div class="modal-actions">
+      <button class="btn" id="sceneCancel">Cancelar</button>
+      <button class="btn primary" id="sceneSave">Salvar cena</button>
     </div>
   </div>
 </div>

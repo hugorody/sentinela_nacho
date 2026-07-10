@@ -70,6 +70,7 @@ class Controller:
     def __init__(self, devices_path=DEVICES, env_path=ENV, labels_path=LABELS):
         self.devices_path = devices_path
         self.labels_path = labels_path
+        self.env_path = env_path
         self._lock = threading.Lock()
         self._lan_cache = {}   # dev_id -> tinytuya.Device (conexao reaproveitada)
         self._cloud = None
@@ -92,6 +93,8 @@ class Controller:
         with self._lock:
             self._devices = self._load_devices()
             self._labels = self._load_labels()
+            self._env = _load_env(self.env_path)
+            self._cloud = None       # forca recriar com as credenciais novas
             self._lan_cache.clear()
 
     # --- rotulos das teclas (nome amigavel por code, dado pelo usuario) ------
