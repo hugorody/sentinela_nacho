@@ -386,6 +386,8 @@ def api_scenes():
         "cameras": cams,
         "devices": devices,
         "smart_ready": TUYA is not None,
+        # Rotulos dos estados de sensor (code -> [nome, textoLigado, textoDesligado]).
+        "sensor_labels": tuya_control.SENSOR_LABELS,
     })
 
 

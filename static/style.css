@@ -211,7 +211,7 @@ body {
 .net-badge.self { border-color: var(--warn); color: var(--warn); }
 .net-badge.tuya { border-color: #a78bfa; color: #a78bfa; }
 
-/* --- Cam alarmes --- */
+/* --- Alarmes --- */
 .alarm-email { display: flex; align-items: center; gap: 8px; flex: 1; }
 .alarm-email label { color: var(--mut); font-size: 13px; white-space: nowrap; }
 .alarm-email input { flex: 1; min-width: 200px; background: #0d1117; border: 1px solid var(--line);
@@ -253,6 +253,11 @@ body {
 .sh-online.on { color: var(--acc); }
 .sh-online.off { color: var(--mut); }
 .sh-body { display: flex; flex-direction: column; gap: 10px; }
+.sensor-row { display: flex; align-items: center; justify-content: space-between; font-size: 14px; }
+.sensor-row > span:first-child { color: var(--mut); }
+.sensor-val { font-weight: 600; }
+.sensor-val.ok { color: var(--acc); }
+.sensor-val.alert { color: var(--warn); }
 .sh-toggle-row, .sh-bright-row { display: flex; align-items: center; gap: 10px; }
 .sh-toggle-label { flex: 1; font-size: 14px; }
 .sh-ch-name { cursor: pointer; border-radius: 6px; padding: 2px 4px; margin: -2px -4px; }

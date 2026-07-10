@@ -44,6 +44,21 @@ _CATEGORY_KIND = {
     "wg2": "hub",     # gateway Zigbee (sem controle proprio)
 }
 
+# Estados booleanos de sensores (nao sao teclas: sao so leitura, mas servem de
+# gatilho para Cenas). Codes tipicos dos sensores Tuya via nuvem.
+_SENSOR_CODES = {"doorcontact_state", "pir", "presence_state",
+                 "watersensor_state", "smoke_sensor_status", "temper_alarm"}
+
+# Rotulos amigaveis por code de sensor: (nome, texto p/ estado True/False).
+SENSOR_LABELS = {
+    "doorcontact_state": ("Porta", "aberta", "fechada"),
+    "pir": ("Movimento", "detectado", "sem movimento"),
+    "presence_state": ("Presença", "detectada", "ausente"),
+    "watersensor_state": ("Vazamento", "detectado", "seco"),
+    "smoke_sensor_status": ("Fumaça", "detectada", "normal"),
+    "temper_alarm": ("Violação", "acionada", "normal"),
+}
+
 # DPs usados no controle LAN de luzes (protocolo local nao usa os 'codes' da
 # nuvem, e sim numeros de DP). Padrao dos produtos de iluminacao Tuya.
 _DP_LIGHT_SWITCH = "1"      # liga/desliga
@@ -178,7 +193,11 @@ class Controller:
                 "kind": kind,
                 "category": d.get("category", ""),
                 "via": "lan" if self._is_lan(d) else "cloud",
+                # controllable = pode ser ACAO (ligar/desligar). sensor nao.
                 "controllable": kind in ("switch", "light"),
+                # observable = pode ser GATILHO de cena (estado observavel).
+                # Sensores entram aqui mesmo sem serem controlaveis.
+                "observable": kind in ("switch", "light", "sensor"),
                 "labels": dict(self._labels.get(d.get("id"), {})),
             })
         return out
@@ -224,16 +243,27 @@ class Controller:
         # switch_backlight (luz de fundo do interruptor) e switch_inching nao
         # sao teclas de carga; ignoramos para nao virarem botoes falsos.
         _NOT_LOAD = {"switch_backlight", "switch_inching"}
-        switches, bright = {}, None
+        switches, bright, battery = {}, None, None
         for item in r.get("result", []):
             code, val = item.get("code", ""), item.get("value")
-            if code in _NOT_LOAD or not isinstance(val, bool):
+            if code in ("battery_percentage", "battery_state") and isinstance(val, (int, float)):
+                battery = int(val)
+                continue
+            if not isinstance(val, bool):
                 if code in ("bright_value", "bright_value_v2") and isinstance(val, (int, float)):
                     bright = self._raw_to_pct(val)
                 continue
-            if code.startswith("switch"):
+            if code in _NOT_LOAD:
+                continue
+            # Teclas de carga (switch*) e estados de sensor (doorcontact_state,
+            # pir, presence_state...) sao ambos bools observaveis: viram
+            # "switches" para reusar a maquinaria de estado/gatilho das Cenas.
+            if code.startswith("switch") or code in _SENSOR_CODES:
                 switches[code] = val
-        return {"online": True, "switches": switches, "brightness": bright}
+        st = {"online": True, "switches": switches, "brightness": bright}
+        if battery is not None:
+            st["battery"] = battery
+        return st
 
     @staticmethod
     def _raw_to_pct(raw):

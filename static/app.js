@@ -25,7 +25,7 @@ function setView(v) {
   VIEW = v;
   $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === v));
   $$('.view').forEach(s => s.hidden = (s.id !== 'view-' + v));
-  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', alarms: 'Cam alarmes', scenes: 'Cenas', smarthome: 'Smart home', network: 'Minha rede', settings: 'Configurações' }[v];
+  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', alarms: 'Alarmes', scenes: 'Cenas', smarthome: 'Smart home', network: 'Minha rede', settings: 'Configurações' }[v];
   if (v === 'faces') loadFaces();
   if (v === 'events') loadEvents();
   if (v === 'recordings') loadRecordings();
@@ -412,7 +412,7 @@ async function loadRecordings() {
 }
 $('#btnRecRefresh').onclick = loadRecordings;
 
-/* ---------- Cam alarmes (e-mail de pessoa não identificada) ---------- */
+/* ---------- Alarmes (e-mail de pessoa não identificada) ---------- */
 let ALARM_CFG = { email: '', cameras: {} };
 
 async function loadAlarms() {
@@ -548,12 +548,21 @@ function devName(id) {
 }
 
 function codeLabel(deviceId, code) {
-  // Usa o nome que o usuário deu à tecla (labels), senão "Tecla N".
+  // Sensores: nome amigável do estado (ex.: doorcontact_state -> "Porta").
+  const sl = SCENE_DATA.sensor_labels && SCENE_DATA.sensor_labels[code];
+  if (sl) return sl[0];
+  // Interruptores/luzes: nome que o usuário deu à tecla (labels), senão "Tecla N".
   const d = SCENE_DATA.devices.find(x => x.id === deviceId);
   const lbl = d && d.labels && d.labels[code];
   if (lbl) return lbl;
   const n = (code || '').match(/switch_(\d+)/);
   return n ? 'Tecla ' + n[1] : code;
+}
+
+// Um dispositivo é sensor?
+function isSensor(deviceId) {
+  const d = SCENE_DATA.devices.find(x => x.id === deviceId);
+  return !!(d && d.kind === 'sensor');
 }
 
 function triggerText(t) {
@@ -562,6 +571,13 @@ function triggerText(t) {
     return `⏰ Às ${esc(t.time || '--:--')} · ${days}`;
   }
   if (t.type === 'device') {
+    const sl = SCENE_DATA.sensor_labels && SCENE_DATA.sensor_labels[t.code];
+    if (isSensor(t.device) && sl) {
+      // Sensor: "🚪 Porta Serviço · quando ficar aberta / fechada / mudar".
+      const txt = { on: 'ficar ' + sl[1], off: 'ficar ' + sl[2], any_change: 'mudar' }[t.state] || 'mudar';
+      const icon = t.code === 'doorcontact_state' ? '🚪' : '📡';
+      return `${icon} ${esc(devName(t.device))} · ${esc(sl[0])} ao ${esc(txt)}`;
+    }
     const st = { on: 'ligar', off: 'desligar', any_change: 'mudar' }[t.state] || 'mudar';
     return `🔌 ${esc(devName(t.device))} · ${esc(codeLabel(t.device, t.code || 'switch_1'))} ao ${st}`;
   }
@@ -642,12 +658,14 @@ function openSceneModal(scene) {
   camSel.innerHTML = '<option value="*">Qualquer câmera</option>'
     + SCENE_DATA.cameras.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
 
-  // Dispositivos controláveis no seletor de gatilho por dispositivo.
+  // Gatilho por dispositivo: lista os OBSERVÁVEIS (inclui sensores, que não
+  // são controláveis mas têm estado que serve de gatilho).
   const devSel = $('#trigDev');
-  const ctrlDevs = SCENE_DATA.devices.filter(d => d.controllable);
-  devSel.innerHTML = ctrlDevs.length
-    ? ctrlDevs.map(d => `<option value="${esc(d.id)}">${esc(d.name || d.id)}</option>`).join('')
+  const obsDevs = SCENE_DATA.devices.filter(d => d.observable || d.controllable);
+  devSel.innerHTML = obsDevs.length
+    ? obsDevs.map(d => `<option value="${esc(d.id)}">${esc(d.name || d.id)}</option>`).join('')
     : '<option value="">(smart home não configurado)</option>';
+  devSel.onchange = () => { fillDeviceCodes(devSel.value); syncDevStateLabels(); };
 
   // Dias da semana (chips).
   const daysWrap = $('#trigDays'); daysWrap.innerHTML = '';
@@ -698,6 +716,14 @@ $('#trigEvent').onchange = syncTriggerUI;
 // neles (ex.: switch_6) também é incluído. Luzes têm uma tecla só.
 function deviceCodes(deviceId) {
   const d = SCENE_DATA.devices.find(x => x.id === deviceId);
+  // Sensores: os estados observáveis conhecidos (porta, movimento, bateria…).
+  // Sensor de porta expõe doorcontact_state; deixamos ele em primeiro.
+  if (d && d.kind === 'sensor') {
+    const known = Object.keys(SCENE_DATA.sensor_labels || {});
+    const order = ['doorcontact_state', 'pir', 'presence_state',
+      'watersensor_state', 'smoke_sensor_status', 'temper_alarm'];
+    return known.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  }
   const labelCodes = (d && d.labels) ? Object.keys(d.labels) : [];
   if (d && d.kind === 'light') {
     return [...new Set(['switch_1', ...labelCodes])].sort();
@@ -712,11 +738,39 @@ function codeOptions(deviceId, selectedCode) {
     `<option value="${esc(c)}"${c === selectedCode ? ' selected' : ''}>${esc(codeLabel(deviceId, c))}</option>`).join('');
 }
 
-// Preenche o seletor de teclas do GATILHO de dispositivo.
+// Preenche o seletor de teclas/estados do GATILHO de dispositivo.
 function fillDeviceCodes(deviceId, selectedCode) {
-  $('#trigDevCode').innerHTML = codeOptions(deviceId, selectedCode);
+  const sel = $('#trigDevCode');
+  sel.innerHTML = codeOptions(deviceId, selectedCode);
+  // Ao trocar a tecla/estado de um sensor, os rótulos "ligar/desligar" mudam.
+  sel.onchange = syncDevStateLabels;
+  syncDevStateLabels();
 }
-$('#trigDev') && ($('#trigDev').onchange = () => fillDeviceCodes($('#trigDev').value));
+
+// Ajusta os textos do seletor "Quando" conforme o tipo. Para sensores usa o
+// vocabulário do estado (ex.: "abrir/fechar"); para teclas, "ligar/desligar".
+function syncDevStateLabels() {
+  const devId = $('#trigDev').value;
+  const code = $('#trigDevCode').value;
+  const stateSel = $('#trigDevState');
+  const cur = stateSel.value;
+  const sl = SCENE_DATA.sensor_labels && SCENE_DATA.sensor_labels[code];
+  const hintEl = $('#trigDevHint');
+  if (isSensor(devId) && sl) {
+    // sl = [nome, textoTrue, textoFalse]. Ex.: ["Porta","aberta","fechada"].
+    stateSel.options[0].textContent = capitalize(sl[1]);   // on  -> estado True
+    stateSel.options[1].textContent = capitalize(sl[2]);   // off -> estado False
+    stateSel.options[2].textContent = 'Mudar (' + sl[1] + '/' + sl[2] + ')';
+    if (hintEl) hintEl.textContent = 'O estado é verificado a cada ~6 segundos; a cena dispara na mudança.';
+  } else {
+    stateSel.options[0].textContent = 'Ligar';
+    stateSel.options[1].textContent = 'Desligar';
+    stateSel.options[2].textContent = 'Mudar (liga ou desliga)';
+    if (hintEl) hintEl.textContent = 'O estado é verificado a cada ~6 segundos; a cena dispara na mudança.';
+  }
+  stateSel.value = cur;
+}
+function capitalize(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
 
 // Uma linha de ação: tipo + campos dependentes.
 function addActionRow(action) {
@@ -874,8 +928,27 @@ async function loadDeviceState(d) {
 
 function renderDeviceBody(card, d, st) {
   const body = card.querySelector('.sh-body');
+  // Sensor: mostra o estado atual (porta aberta/fechada etc.) + bateria.
+  if (d.kind === 'sensor') {
+    if (!st.online) { body.innerHTML = `<div class="muted">${esc(st.error || 'sem resposta')}</div>`; return; }
+    const sw = st.switches || {};
+    const rows = [];
+    for (const [code, val] of Object.entries(sw)) {
+      const sl = SCENE_DATA.sensor_labels && SCENE_DATA.sensor_labels[code];
+      if (!sl) continue;
+      const on = !!val;  // sl[1] = texto p/ true, sl[2] = texto p/ false
+      rows.push(`<div class="sensor-row"><span>${esc(sl[0])}</span>
+        <span class="sensor-val ${on ? 'alert' : 'ok'}">${esc(capitalize(on ? sl[1] : sl[2]))}</span></div>`);
+    }
+    if (st.battery != null) {
+      rows.push(`<div class="sensor-row"><span>Bateria</span>
+        <span class="sensor-val ${st.battery < 20 ? 'alert' : ''}">${st.battery}%</span></div>`);
+    }
+    body.innerHTML = rows.length ? rows.join('') : '<div class="muted">Somente leitura</div>';
+    return;
+  }
   if (!d.controllable) {
-    body.innerHTML = `<div class="muted">${d.kind === 'sensor' ? 'Somente leitura' : 'Sem controle'}</div>`;
+    body.innerHTML = `<div class="muted">Sem controle</div>`;
     return;
   }
   if (!st.online) {
