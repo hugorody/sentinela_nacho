@@ -31,3 +31,10 @@ As credenciais das cameras ficam fora do git:
 ```bash
 python3 app.py            # dashboard web em http://localhost:5000
 ```
+
+## Gravacao
+
+Cada camera tem um botao **REC** no painel que liga/desliga a gravacao
+continua. Os videos sao salvos em segmentos `.mp4` (10 min por padrao) na
+pasta `gravacoes/`, que fica fora do git. Para gravar tudo desde o inicio,
+instancie o `Engine` com `record_all=True`.

@@ -87,13 +87,17 @@ function renderCameras(cams) {
             <div class="cam-name"></div>
             <div class="cam-meta"></div>
           </div>
-          <span class="pill">${c.status}</span>
+          <div class="cam-actions">
+            <button class="rec-btn" title="Gravar">● REC</button>
+            <span class="pill">${c.status}</span>
+          </div>
         </div>`;
       const nameEl = card.querySelector('.cam-name');
       nameEl.textContent = c.name;
       nameEl.title = 'Clique para renomear';
       nameEl.onclick = () => editCamName(c.id, nameEl);
       card.querySelector('.cam-video').onclick = () => openLightbox(c.id);
+      card.querySelector('.rec-btn').onclick = () => toggleRecord(c.id);
       grid.appendChild(card);
     }
   }
@@ -107,7 +111,22 @@ function renderCameras(cams) {
     card.querySelector('.cam-live').innerHTML =
       `<span class="dot ${online ? 'on' : 'off'}"></span>${online ? 'AO VIVO' : (c.status || 'parada')}`;
     card.querySelector('.cam-meta').textContent = `${c.ip || ''} · ${c.faces} rosto(s)`;
+    const rec = card.querySelector('.rec-btn');
+    // 'record' = pedido de gravacao; 'recording' = escrevendo em disco agora.
+    rec.classList.toggle('armed', !!c.record);
+    rec.classList.toggle('live', !!c.recording);
+    rec.textContent = c.recording ? '● GRAVANDO' : (c.record ? '● …' : '● REC');
   }
+}
+
+async function toggleRecord(cid) {
+  try {
+    const r = await api('/api/record', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: cid }),
+    });
+    if (r.status) refreshStatus();
+  } catch { toast('Falha ao alternar gravação', 'err'); }
 }
 
 /* ---------- Câmera ampliada (lightbox) ---------- */

@@ -80,6 +80,22 @@ def api_add_camera():
     return jsonify({"ok": bool(cam), "status": ENGINE.status()})
 
 
+# --- Gravacao --------------------------------------------------------------
+
+@app.post("/api/record")
+def api_record():
+    """Liga/desliga a gravacao de uma camera. Sem 'on', alterna o estado."""
+    data = request.get_json(force=True, silent=True) or {}
+    cid = data.get("id")
+    if ENGINE.get_camera(cid) is None:
+        return jsonify({"error": "camera nao encontrada"}), 404
+    if "on" in data:
+        ENGINE.set_recording(cid, bool(data["on"]))
+    else:
+        ENGINE.toggle_recording(cid)
+    return jsonify({"ok": True, "status": ENGINE.status()})
+
+
 # --- Minha rede (dispositivos conectados) ---------------------------------
 
 @app.route("/api/network")

@@ -100,6 +100,14 @@ body {
 .pill { font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600; }
 .pill.online { background: var(--acc-dim); color: var(--acc); }
 .pill.offline, .pill.parada { background: #2a2230; color: var(--warn); }
+.cam-actions { display: flex; align-items: center; gap: 8px; }
+.rec-btn { font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 20px;
+  border: 1px solid var(--line); background: transparent; color: var(--mut); cursor: pointer; }
+.rec-btn:hover { border-color: var(--danger); color: var(--danger); }
+.rec-btn.armed { border-color: var(--danger); color: var(--danger); }
+.rec-btn.live { background: var(--danger); color: #fff; border-color: var(--danger);
+  animation: recpulse 1.4s ease-in-out infinite; }
+@keyframes recpulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 
 /* Faces */
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }

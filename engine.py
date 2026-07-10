@@ -36,6 +36,18 @@ def mask_rtsp_url(url):
     return re.sub(r"://([^:/@]+):[^@/]+@", r"://\1:***@", url or "", count=1)
 
 
+def new_writer(width, height, fps, outdir, prefix):
+    """Cria um VideoWriter .mp4 com timestamp no nome. Retorna (writer, path)."""
+    if not fps or fps <= 1 or fps > 60:
+        fps = 15.0
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = outdir / f"{safe_name(prefix)}_{ts}.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    return cv2.VideoWriter(str(path), fourcc, fps, (width or 1920, height or 1080)), path
+
+
 # --- Log de eventos --------------------------------------------------------
 
 class EventLogger:
@@ -123,9 +135,11 @@ def _json_loads(s):
 class CameraWorker(threading.Thread):
     """Captura RTSP com reconexao automatica; mantem o ultimo quadro em memoria."""
 
-    def __init__(self, cam):
+    def __init__(self, cam, rec_dir="./gravacoes", seg_seconds=600):
         super().__init__(daemon=True)
         self.cam = cam          # dict compartilhado com o Engine
+        self.rec_dir = rec_dir
+        self.seg_seconds = seg_seconds
         self._stop = threading.Event()
 
     def stop(self):
@@ -135,6 +149,16 @@ class CameraWorker(threading.Thread):
         cam = self.cam
         backoff = 1.0
         cap = None
+        writer = None
+        seg_start = 0.0
+
+        def close_writer():
+            nonlocal writer
+            if writer is not None:
+                writer.release()
+                writer = None
+                cam["recording"] = False
+
         while not self._stop.is_set():
             if cap is None:
                 cap = cv2.VideoCapture(cam["url"], cv2.CAP_FFMPEG)
@@ -156,9 +180,25 @@ class CameraWorker(threading.Thread):
                 cap = None
                 cam["status"] = "offline"
                 cam["frame"] = None
+                close_writer()  # segmento incompleto e finalizado ao reconectar
                 continue
             cam["frame"] = frame
 
+            # Gravacao continua em segmentos .mp4 (liga/desliga via cam["record"]).
+            if cam.get("record"):
+                now = time.time()
+                if writer is None or now - seg_start >= self.seg_seconds:
+                    close_writer()
+                    h, w = frame.shape[:2]
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    writer, _ = new_writer(w, h, fps, self.rec_dir, cam["name"])
+                    seg_start = now
+                    cam["recording"] = True
+                writer.write(frame)
+            else:
+                close_writer()
+
+        close_writer()
         if cap is not None:
             cap.release()
         cam["status"] = "parada"
@@ -171,13 +211,17 @@ class Engine:
     """Orquestra cameras, IA facial, historico e eventos. Thread-safe."""
 
     def __init__(self, config_path="cameras.json", face_log="./historico_faces",
-                 face_interval=0.7, face_threshold=None, det_width=960):
+                 face_interval=0.7, face_threshold=None, det_width=960,
+                 rec_dir="./gravacoes", seg_seconds=600, record_all=False):
         self.config_path = config_path
         self.face_log = face_log
         self.face_interval = face_interval
         self.face_threshold = (face_threshold if face_threshold is not None
                                else face_recog.SFACE_COSINE_THRESHOLD)
         self.det_width = det_width
+        self.rec_dir = rec_dir
+        self.seg_seconds = seg_seconds
+        self.record_all = record_all
 
         self.cameras = []          # lista de dicts
         self._lock = threading.Lock()
@@ -219,6 +263,8 @@ class Engine:
             "faces": [],
             "face_size": None,
             "next_face": 0.0,
+            "record": self.record_all,   # grava desde o inicio se ligado global
+            "recording": False,          # esta escrevendo em disco agora?
         }
         self.cameras.append(cam)
         return cam
@@ -244,7 +290,7 @@ class Engine:
             self.running = True
             self._init_face()
             for cam in self.cameras:
-                cam["worker"] = CameraWorker(cam)
+                cam["worker"] = CameraWorker(cam, self.rec_dir, self.seg_seconds)
                 cam["worker"].start()
             if self.face_enabled:
                 self._face_thread = threading.Thread(target=self._face_loop, daemon=True)
@@ -349,7 +395,7 @@ class Engine:
                 if cam is not None:
                     added.append(cam)
                     if self.running:
-                        cam["worker"] = CameraWorker(cam)
+                        cam["worker"] = CameraWorker(cam, self.rec_dir, self.seg_seconds)
                         cam["worker"].start()
         if added:
             self._persist()
@@ -385,7 +431,7 @@ class Engine:
         with self._lock:
             cam = self._add_cam_dict({"url": url, "name": name})
             if cam and self.running:
-                cam["worker"] = CameraWorker(cam)
+                cam["worker"] = CameraWorker(cam, self.rec_dir, self.seg_seconds)
                 cam["worker"].start()
         if cam:
             self._persist()
@@ -398,6 +444,25 @@ class Engine:
             discover.save_config(payload, self.config_path)
         except OSError:
             pass
+
+    # ---- Gravacao ----
+
+    def set_recording(self, cid, on):
+        """Liga/desliga a gravacao de uma camera. O worker aplica no proximo quadro."""
+        with self._lock:
+            cam = self.get_camera(cid)
+            if cam is None:
+                return False
+            cam["record"] = bool(on)
+        return True
+
+    def toggle_recording(self, cid):
+        cam = self.get_camera(cid)
+        if cam is None:
+            return None
+        new = not cam.get("record")
+        self.set_recording(cid, new)
+        return new
 
     # ---- Status ----
 
@@ -413,6 +478,8 @@ class Engine:
                 "status": c.get("status", "parada"),
                 "url": mask_rtsp_url(c["url"]),
                 "faces": len(c.get("faces") or []),
+                "record": bool(c.get("record")),
+                "recording": bool(c.get("recording")),
             } for c in self.cameras],
         }
 
