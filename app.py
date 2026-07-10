@@ -240,6 +240,45 @@ def api_smarthome_label():
     return jsonify({"ok": ok})
 
 
+# --- Cam alarmes (e-mail quando aparece alguem nao identificado) -----------
+
+@app.route("/api/alarms")
+def api_alarms():
+    """Config de alarmes + lista de cameras (para casar cada uma com sua config)."""
+    cfg = ENGINE.alarms.get_config()
+    cams = [{"id": c["id"], "name": c["name"]} for c in ENGINE.cameras]
+    return jsonify({"config": cfg, "cameras": cams})
+
+
+@app.post("/api/alarms/email")
+def api_alarms_email():
+    """Define o e-mail global (destino padrao de todas as cameras)."""
+    data = request.get_json(force=True, silent=True) or {}
+    ENGINE.alarms.set_global_email(data.get("email"))
+    return jsonify({"ok": True, "config": ENGINE.alarms.get_config()})
+
+
+@app.post("/api/alarms/camera")
+def api_alarms_camera():
+    """Atualiza a config de alarme de uma camera (enabled/windows/recipients)."""
+    data = request.get_json(force=True, silent=True) or {}
+    ok = ENGINE.alarms.set_camera(
+        data.get("camera"),
+        enabled=data.get("enabled"),
+        windows=data.get("windows"),
+        recipients=data.get("recipients"),
+    )
+    return jsonify({"ok": ok, "config": ENGINE.alarms.get_config()})
+
+
+@app.post("/api/alarms/test")
+def api_alarms_test():
+    """Envia um e-mail de teste para os destinatarios da camera indicada."""
+    data = request.get_json(force=True, silent=True) or {}
+    res = ENGINE.alarms.send_test(data.get("camera"))
+    return jsonify(res), (200 if res.get("ok") else 400)
+
+
 # --- Video ao vivo (MJPEG) ------------------------------------------------
 
 @app.route("/video/<cid>")

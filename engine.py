@@ -19,6 +19,7 @@ from pathlib import Path
 
 import cv2
 
+import alarms
 import discover
 import face_recog
 
@@ -306,6 +307,7 @@ class Engine:
         self.known = None
         self.history = None
         self.events = EventLogger(face_log)
+        self.alarms = alarms.AlarmManager()
         self.face_enabled = False
         self.using_gpu = False
 
@@ -440,6 +442,10 @@ class Engine:
                         self.events.log(cam["name"], name, f.get("match", 0), frame, f["box"])
                     elif "name" in f:  # identificacao ligada, mas desconhecido
                         self.events.log(cam["name"], None, f.get("score", 0), frame, f["box"])
+                        # Alarme: pessoa nao identificada numa camera com alarme
+                        # ativo (respeita janela de horario e cooldown internos).
+                        self.alarms.notify_unknown(
+                            cam["name"], frame, f.get("score", 0))
             time.sleep(0.03)
 
     # ---- Saida de video ----

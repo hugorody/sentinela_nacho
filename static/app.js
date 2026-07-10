@@ -26,10 +26,11 @@ function setView(v) {
   VIEW = v;
   $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === v));
   $$('.view').forEach(s => s.hidden = (s.id !== 'view-' + v));
-  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', smarthome: 'Smart home', network: 'Minha rede' }[v];
+  $('#viewTitle').textContent = { cameras: 'Câmeras', faces: 'Rostos', events: 'Eventos', recordings: 'Gravações', alarms: 'Cam alarmes', smarthome: 'Smart home', network: 'Minha rede' }[v];
   if (v === 'faces') loadFaces();
   if (v === 'events') loadEvents();
   if (v === 'recordings') loadRecordings();
+  if (v === 'alarms') loadAlarms();
   if (v === 'smarthome') loadSmartHome();
   if (v === 'network') loadNetwork();
 }
@@ -380,6 +381,125 @@ async function loadRecordings() {
   }
 }
 $('#btnRecRefresh').onclick = loadRecordings;
+
+/* ---------- Cam alarmes (e-mail de pessoa não identificada) ---------- */
+let ALARM_CFG = { email: '', cameras: {} };
+
+async function loadAlarms() {
+  let data = { config: { email: '', cameras: {} }, cameras: [] };
+  try { data = await api('/api/alarms'); }
+  catch { toast('Falha ao carregar alarmes', 'err'); }
+  if (VIEW !== 'alarms') return;
+  ALARM_CFG = data.config || { email: '', cameras: {} };
+  $('#alarmEmail').value = ALARM_CFG.email || '';
+  renderAlarms(data.cameras || []);
+}
+
+function renderAlarms(cams) {
+  $('#alarmEmpty').hidden = cams.length > 0;
+  const grid = $('#alarmGrid'); grid.innerHTML = '';
+  for (const cam of cams) {
+    const cfg = ALARM_CFG.cameras[cam.name] || { enabled: false, windows: [], recipients: '' };
+    const card = document.createElement('div');
+    card.className = 'alarm-card' + (cfg.enabled ? ' on' : '');
+    card.dataset.cam = cam.name;
+    card.innerHTML = `
+      <div class="alarm-head">
+        <div class="alarm-title">${esc(cam.name)}</div>
+        <button class="sh-toggle ${cfg.enabled ? 'on' : ''}" role="switch" aria-checked="${cfg.enabled}">
+          <span class="knob"></span>
+        </button>
+      </div>
+      <div class="alarm-body">
+        <label class="alarm-lbl">Horários ativos <span class="muted">(vazio = 24h)</span></label>
+        <div class="alarm-windows"></div>
+        <button class="btn small alarm-add-win">+ Adicionar horário</button>
+        <label class="alarm-lbl">Destinatário desta câmera <span class="muted">(opcional)</span></label>
+        <input class="alarm-recip" type="text" placeholder="usa o e-mail padrão se vazio" value="${(cfg.recipients || '').replace(/"/g, '&quot;')}">
+        <div class="alarm-actions">
+          <button class="btn small alarm-test">Enviar teste</button>
+        </div>
+      </div>`;
+
+    // Toggle ativar/desativar.
+    const toggle = card.querySelector('.sh-toggle');
+    toggle.onclick = () => {
+      const on = !toggle.classList.contains('on');
+      saveAlarmCamera(cam.name, { enabled: on });
+      toggle.classList.toggle('on', on);
+      card.classList.toggle('on', on);
+    };
+
+    // Janelas de horário.
+    const winWrap = card.querySelector('.alarm-windows');
+    const windows = (cfg.windows || []).map(w => ({ ...w }));
+    const renderWindows = () => {
+      winWrap.innerHTML = '';
+      if (!windows.length) {
+        winWrap.innerHTML = '<div class="muted alarm-247">Ativo 24 horas</div>';
+      }
+      windows.forEach((w, i) => {
+        const row = document.createElement('div');
+        row.className = 'alarm-win';
+        row.innerHTML = `
+          <input type="time" class="win-start" value="${esc(w.start || '22:00')}">
+          <span>até</span>
+          <input type="time" class="win-end" value="${esc(w.end || '06:00')}">
+          <button class="win-del" title="Remover">✕</button>`;
+        row.querySelector('.win-start').onchange = (e) => { windows[i].start = e.target.value; persistWindows(); };
+        row.querySelector('.win-end').onchange = (e) => { windows[i].end = e.target.value; persistWindows(); };
+        row.querySelector('.win-del').onclick = () => { windows.splice(i, 1); renderWindows(); persistWindows(); };
+        winWrap.appendChild(row);
+      });
+    };
+    const persistWindows = () => saveAlarmCamera(cam.name, { windows });
+    card.querySelector('.alarm-add-win').onclick = () => {
+      windows.push({ start: '22:00', end: '06:00' });
+      renderWindows(); persistWindows();
+    };
+    renderWindows();
+
+    // Destinatário específico (salva ao sair do campo).
+    const recip = card.querySelector('.alarm-recip');
+    recip.onchange = () => saveAlarmCamera(cam.name, { recipients: recip.value.trim() });
+
+    // Teste.
+    card.querySelector('.alarm-test').onclick = async (e) => {
+      const b = e.target; b.disabled = true; b.textContent = 'Enviando…';
+      try {
+        const r = await api('/api/alarms/test', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ camera: cam.name })
+        });
+        toast(r.ok ? ('E-mail de teste enviado para ' + (r.recipients || []).join(', ')) : (r.error || 'Falha'), r.ok ? 'ok' : 'err');
+      } catch (err) { toast('Falha ao enviar teste', 'err'); }
+      b.disabled = false; b.textContent = 'Enviar teste';
+    };
+
+    grid.appendChild(card);
+  }
+}
+
+async function saveAlarmCamera(camera, fields) {
+  try {
+    const r = await api('/api/alarms/camera', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ camera, ...fields })
+    });
+    if (r.config) ALARM_CFG = r.config;
+  } catch (e) { toast('Falha ao salvar alarme', 'err'); }
+}
+
+$('#btnAlarmEmail').onclick = async () => {
+  try {
+    const r = await api('/api/alarms/email', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: $('#alarmEmail').value.trim() })
+    });
+    if (r.config) ALARM_CFG = r.config;
+    toast('E-mail de destino salvo', 'ok');
+  } catch (e) { toast('Falha ao salvar e-mail', 'err'); }
+};
 
 /* ---------- Smart home (dispositivos Tuya) ---------- */
 let SH_LOADING = false;

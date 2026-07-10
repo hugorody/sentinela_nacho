@@ -28,3 +28,6 @@ tuya_devices.json
 
 # Nomes das teclas dados pelo usuario
 tuya_labels.json
+
+# Config de alarmes (e-mails de destino)
+alarms.json

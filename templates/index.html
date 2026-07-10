@@ -30,6 +30,9 @@
       <a class="nav-item" data-view="recordings">
         <span class="ic">⏺</span> Gravações
       </a>
+      <a class="nav-item" data-view="alarms">
+        <span class="ic">◈</span> Cam alarmes
+      </a>
       <a class="nav-item" data-view="smarthome">
         <span class="ic">⌂</span> Smart home
       </a>
@@ -116,6 +119,25 @@
       <div class="grid" id="recGrid"></div>
       <div class="empty" id="recEmpty" hidden>
         Nenhuma gravação ainda. Ligue o <b>● REC</b> em uma câmera para começar a gravar.
+      </div>
+    </section>
+
+    <!-- View: Cam alarmes -->
+    <section class="view" id="view-alarms" hidden>
+      <div class="subbar">
+        <div class="alarm-email">
+          <label>E-mail de destino (padrão)</label>
+          <input id="alarmEmail" type="text" placeholder="voce@exemplo.com, outro@exemplo.com">
+          <button class="btn primary" id="btnAlarmEmail">Salvar</button>
+        </div>
+      </div>
+      <p class="muted" style="margin:0 0 14px">
+        Quando uma câmera com alarme <b>ativado</b> vê alguém <b>não identificado</b>
+        dentro do horário configurado, você recebe um e-mail com um screenshot.
+      </p>
+      <div class="grid alarm-grid" id="alarmGrid"></div>
+      <div class="empty" id="alarmEmpty" hidden>
+        Nenhuma câmera cadastrada. Adicione câmeras na aba <b>Câmeras</b> primeiro.
       </div>
     </section>
 
