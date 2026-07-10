@@ -205,6 +205,9 @@ body {
 .net-badge.router { border-color: var(--blue); color: var(--blue); }
 .net-badge.cam { border-color: var(--acc); color: var(--acc); }
 .net-badge.self { border-color: var(--warn); color: var(--warn); }
+.svc-cell { max-width: 260px; }
+.svc-tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 8px;
+  margin: 2px 3px 2px 0; background: var(--panel-2); border: 1px solid var(--line); color: var(--fg); white-space: nowrap; }
 .net-state { display: inline-flex; align-items: center; gap: 6px; color: var(--mut); }
 .net-state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--mut); }
 .net-state.on { color: var(--acc); }

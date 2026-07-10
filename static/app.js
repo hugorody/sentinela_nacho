@@ -403,15 +403,19 @@ async function loadNetwork() {
   $('#netTable').hidden = devs.length === 0;
   const body = $('#netBody'); body.innerHTML = '';
   for (const d of devs) {
-    const name = d.hostname || d.vendor || '—';
+    const name = esc(d.hostname || d.advert || d.vendor || '—');
+    const svc = (d.services || []).length
+      ? (d.services || []).map(s => `<span class="svc-tag">${esc(s)}</span>`).join(' ')
+      : '<span class="muted">—</span>';
     const tr = document.createElement('tr');
     if (d.is_camera) tr.className = 'is-cam';
     tr.innerHTML = `
       <td><b>${name}</b> ${netTag(d)}</td>
-      <td class="mono">${d.ip}</td>
-      <td class="mono muted">${d.mac || '—'}</td>
-      <td>${d.vendor || '—'}</td>
-      <td><span class="net-state ${d.state === 'REACHABLE' ? 'on' : ''}">${STATE_LABEL[d.state] || d.state.toLowerCase()}</span></td>`;
+      <td class="mono">${esc(d.ip)}</td>
+      <td class="mono muted">${esc(d.mac || '—')}</td>
+      <td>${esc(d.vendor || '—')}</td>
+      <td class="svc-cell">${svc}</td>
+      <td><span class="net-state ${d.state === 'REACHABLE' ? 'on' : ''}">${STATE_LABEL[d.state] || esc(d.state.toLowerCase())}</span></td>`;
     body.appendChild(tr);
   }
 }
