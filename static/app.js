@@ -125,8 +125,12 @@ async function toggleRecord(cid) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: cid }),
     });
-    if (r.status) refreshStatus();
-  } catch { toast('Falha ao alternar gravação', 'err'); }
+    // O backend responde {ok:true, status:{...}} em caso de sucesso, ou
+    // {error:"..."} com HTTP != 2xx (ex.: camera fora de sincronia). Sem
+    // este tratamento, um erro do servidor nao dava nenhum retorno na tela.
+    if (!r.ok) throw new Error(r.error || 'resposta invalida');
+    await refreshStatus();
+  } catch (e) { toast('Falha ao alternar gravação' + (e.message ? ': ' + e.message : ''), 'err'); }
 }
 
 /* ---------- Câmera ampliada (lightbox) ---------- */
