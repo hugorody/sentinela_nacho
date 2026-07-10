@@ -685,7 +685,7 @@ function openSceneModal(scene) {
   $('#trigTime').value = t.time || '18:30';
   (t.days || []).forEach(d => { const c = daysWrap.querySelector(`[data-day="${d}"]`); if (c) c.classList.add('on'); });
   // Gatilho de dispositivo: seleciona o device, preenche as teclas e o estado.
-  if (t.type === 'device' && t.device && ctrlDevs.some(d => d.id === t.device)) {
+  if (t.type === 'device' && t.device && obsDevs.some(d => d.id === t.device)) {
     devSel.value = t.device;
   }
   fillDeviceCodes(devSel.value, t.code);
