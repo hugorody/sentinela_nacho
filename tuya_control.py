@@ -86,8 +86,14 @@ class Controller:
         self.devices_path = devices_path
         self.labels_path = labels_path
         self.env_path = env_path
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()      # protege caches/config (rapido)
         self._lan_cache = {}   # dev_id -> tinytuya.Device (conexao reaproveitada)
+        self._gw_cache = {}    # gateway_id -> tinytuya.Device (Hub, reaproveitado)
+        # Lock por CONEXAO fisica: cada aparelho Wi-Fi tem o seu; todos os
+        # sub-dispositivos de um Hub compartilham o lock do Hub (conexao unica).
+        # Assim Wi-Fi e Hub operam em paralelo, mas o I/O de uma mesma conexao
+        # nao se atropela.
+        self._io_locks = {}
         self._cloud = None
         self._devices = self._load_devices()
         self._labels = self._load_labels()  # {dev_id: {code: nome_da_tecla}}
@@ -111,6 +117,7 @@ class Controller:
             self._env = _load_env(self.env_path)
             self._cloud = None       # forca recriar com as credenciais novas
             self._lan_cache.clear()
+            self._gw_cache.clear()
 
     # --- rotulos das teclas (nome amigavel por code, dado pelo usuario) ------
 
@@ -169,16 +176,73 @@ class Controller:
         return self._cloud
 
     def _lan_device(self, dev):
-        d = self._lan_cache.get(dev["id"])
-        if d is None:
-            d = tinytuya.Device(
-                dev["id"], dev["ip"], dev["key"],
-                version=float(dev.get("version", "3.3")),
-            )
-            d.set_socketTimeout(5)
-            d.set_socketPersistent(True)  # mantem a conexao TCP aberta
-            self._lan_cache[dev["id"]] = d
-        return d
+        with self._lock:
+            d = self._lan_cache.get(dev["id"])
+            if d is None:
+                d = tinytuya.Device(
+                    dev["id"], dev["ip"], dev["key"],
+                    version=float(dev.get("version", "3.3")),
+                )
+                d.set_socketTimeout(5)
+                d.set_socketPersistent(True)  # mantem a conexao TCP aberta
+                self._lan_cache[dev["id"]] = d
+            return d
+
+    # --- controle local de sub-dispositivos Zigbee (via Hub) ----------------
+
+    def _gateway_dev(self, gateway_id):
+        """Metadados do Hub (gateway) de um sub-dispositivo. None se ausente."""
+        gw = self._by_id(gateway_id)
+        return gw if gw and gw.get("ip") else None
+
+    def _sub_local(self, dev):
+        """Conexao LOCAL de um sub-dispositivo Zigbee, atraves do Hub.
+
+        Retorna um tinytuya.Device ligado ao gateway (persistente e cacheado)
+        usando o node_id como 'cid'. None se o Hub nao tiver IP conhecido
+        (ai o controle cai para a nuvem).
+        """
+        gw_meta = self._gateway_dev(dev.get("gateway_id"))
+        if gw_meta is None or not dev.get("node_id"):
+            return None
+        with self._lock:
+            gw = self._gw_cache.get(gw_meta["id"])
+            if gw is None:
+                gw = tinytuya.Device(
+                    gw_meta["id"], address=gw_meta["ip"], local_key=gw_meta["key"],
+                    version=float(gw_meta.get("version", "3.3")), persist=True,
+                )
+                gw.set_socketTimeout(5)
+                self._gw_cache[gw_meta["id"]] = gw
+            sub = self._lan_cache.get(dev["id"])
+            if sub is None:
+                sub = tinytuya.Device(
+                    dev_id=gw_meta["id"], cid=dev["node_id"], parent=gw,
+                    version=float(gw_meta.get("version", "3.3")),
+                )
+                self._lan_cache[dev["id"]] = sub
+            return sub
+
+    def _is_zigbee(self, dev):
+        """Sub-dispositivo Zigbee: tem node_id e um Hub com IP na rede."""
+        return bool(dev.get("node_id")) and self._gateway_dev(dev.get("gateway_id")) is not None
+
+    def _io_lock_for(self, dev):
+        """Lock da CONEXAO fisica do dispositivo (por Hub, por aparelho LAN, ou
+        um lock de nuvem compartilhado). Serializa o I/O sem bloquear conexoes
+        independentes."""
+        if self._is_zigbee(dev):
+            key = "gw:" + dev.get("gateway_id", "")
+        elif self._is_lan(dev):
+            key = "lan:" + dev["id"]
+        else:
+            key = "cloud"
+        with self._lock:
+            lk = self._io_locks.get(key)
+            if lk is None:
+                lk = threading.Lock()
+                self._io_locks[key] = lk
+            return lk
 
     # --- listagem -----------------------------------------------------------
 
@@ -192,7 +256,10 @@ class Controller:
                 "name": d.get("name", ""),
                 "kind": kind,
                 "category": d.get("category", ""),
-                "via": "lan" if self._is_lan(d) else "cloud",
+                # 'lan' = Wi-Fi direto; 'hub' = Zigbee controlado localmente
+                # pelo Hub; 'cloud' = precisa da nuvem.
+                "via": ("lan" if self._is_lan(d)
+                        else "hub" if self._is_zigbee(d) else "cloud"),
                 # controllable = pode ser ACAO (ligar/desligar). sensor nao.
                 "controllable": kind in ("switch", "light"),
                 # observable = pode ser GATILHO de cena (estado observavel).
@@ -208,10 +275,49 @@ class Controller:
         dev = self._by_id(dev_id)
         if dev is None:
             return {"error": "dispositivo desconhecido"}
-        with self._lock:
+        # I/O sob o lock da CONEXAO (Hub/LAN/nuvem), nao um lock global: conexoes
+        # independentes rodam em paralelo (essencial p/ acender/apagar tudo).
+        with self._io_lock_for(dev):
             if self._is_lan(dev):
                 return self._lan_state(dev)
+            if self._is_zigbee(dev):
+                st = self._hub_state(dev)
+                if st.get("online"):
+                    return st
             return self._cloud_state(dev)
+
+    def _hub_state(self, dev):
+        """Le o estado de um sub-dispositivo Zigbee LOCALMENTE, via Hub.
+
+        Sub-dispositivos reportam DPs numericos ('1'..'6' = teclas). Mapeamos
+        para switch_N; sensores (kind sensor) usam o DP conhecido do estado.
+        """
+        sub = self._sub_local(dev)
+        if sub is None:
+            return {"online": False}
+        try:
+            st = sub.status() or {}
+        except Exception as exc:
+            return {"online": False, "error": str(exc)}
+        dps = st.get("dps")
+        if not isinstance(dps, dict):
+            return {"online": False, "error": st.get("Error", "sem resposta")}
+        switches, battery = {}, None
+        kind = self._kind(dev)
+        for dp, val in dps.items():
+            if isinstance(val, bool):
+                if kind == "sensor":
+                    # Sensor de porta local: DP '1' = doorcontact_state.
+                    if dp == "1":
+                        switches["doorcontact_state"] = val
+                else:
+                    switches[f"switch_{dp}"] = val
+            elif dp in ("3", "4") and kind == "sensor" and isinstance(val, (int, float)):
+                battery = int(val)  # muitos sensores Zigbee reportam bateria no DP 3/4
+        out = {"online": True, "switches": switches, "brightness": None}
+        if battery is not None:
+            out["battery"] = battery
+        return out
 
     def _lan_state(self, dev):
         try:
@@ -281,14 +387,20 @@ class Controller:
         dev = self._by_id(dev_id)
         if dev is None:
             return {"error": "dispositivo desconhecido"}
-        with self._lock:
+        # code "switch_N" -> DP numerico "N" (protocolo local).
+        dp = _DP_LIGHT_SWITCH if code in ("switch_1", "switch") else code.replace("switch_", "")
+        with self._io_lock_for(dev):
             if self._is_lan(dev):
-                dp = _DP_LIGHT_SWITCH if code in ("switch_1", "switch") else code.replace("switch_", "")
                 try:
                     self._lan_device(dev).set_value(dp, bool(on))
                     return {"ok": True}
                 except Exception as exc:
                     return {"error": str(exc)}
+            # Zigbee: tenta pelo Hub local; se falhar, cai para a nuvem.
+            if self._is_zigbee(dev):
+                r = self._hub_command(dev, dp, bool(on))
+                if r.get("ok"):
+                    return r
             return self._cloud_command(dev, code, bool(on))
 
     def set_brightness(self, dev_id, pct):
@@ -296,14 +408,36 @@ class Controller:
         if dev is None:
             return {"error": "dispositivo desconhecido"}
         raw = self._pct_to_raw(int(pct))
-        with self._lock:
+        with self._io_lock_for(dev):
             if self._is_lan(dev):
                 try:
                     self._lan_device(dev).set_value(_DP_LIGHT_BRIGHT, raw)
                     return {"ok": True}
                 except Exception as exc:
                     return {"error": str(exc)}
+            if self._is_zigbee(dev):
+                r = self._hub_command(dev, _DP_LIGHT_BRIGHT, raw)
+                if r.get("ok"):
+                    return r
             return self._cloud_command(dev, "bright_value_v2", raw)
+
+    def _hub_command(self, dev, dp, value, nowait=False):
+        """Envia um comando a um sub-dispositivo Zigbee LOCALMENTE, via Hub.
+
+        nowait=True dispara sem esperar a confirmacao (~10ms vs ~180ms). Usado
+        no acender/apagar tudo, onde o estado e relido depois; e evita o timeout
+        longo ao mandar para uma tecla que o interruptor nao possui.
+        """
+        sub = self._sub_local(dev)
+        if sub is None:
+            return {"ok": False, "error": "hub indisponivel"}
+        try:
+            r = sub.set_value(dp, value, nowait=nowait)
+            if not nowait and isinstance(r, dict) and r.get("Error"):
+                return {"ok": False, "error": r.get("Error")}
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def _cloud_command(self, dev, code, value):
         try:
@@ -317,37 +451,84 @@ class Controller:
 
     # --- comando em massa (acender/apagar tudo) -----------------------------
 
+    def _switch_codes(self, dev):
+        """Teclas de carga de um dispositivo.
+
+        Luz = switch_1. Interruptor Zigbee (Hub) = switch_1..6: teclas extras
+        sao inofensivas la (disparadas com nowait, o Hub ignora as inexistentes).
+        Interruptor Wi-Fi (LAN direto) = so as teclas REAIS, lidas do estado --
+        mandar teclas inexistentes no protocolo LAN trava ~5s cada esperando
+        resposta.
+        """
+        kind = self._kind(dev)
+        if kind == "light":
+            return ["switch_1"]
+        if self._is_lan(dev):
+            st = self._lan_state(dev)
+            codes = sorted((st.get("switches") or {}).keys())
+            return codes or ["switch_1"]
+        codes = ["switch_%d" % i for i in range(1, 7)]
+        labels = self._labels.get(dev.get("id"), {})
+        for c in labels:
+            if c.startswith("switch") and c not in codes:
+                codes.append(c)
+        return codes
+
     def set_all(self, on):
         """Liga (ou desliga) todas as teclas de todos os aparelhos controlaveis.
 
-        Cada dispositivo e tratado numa thread (descobre as teclas pelo estado
-        atual e aciona uma a uma). Os metodos publicos pegam o lock por conta
-        propria, entao aqui NAO seguramos o lock (evita serializar/travar).
-        Retorna um resumo: quantos dispositivos e teclas tiveram sucesso.
+        Estrategia por tipo de conexao:
+          * Zigbee (Hub): uma unica passagem, disparando todas as teclas com
+            nowait=True (~10ms cada). Reusa a conexao do Hub; nao espera
+            confirmacao (a UI rele o estado depois). Evita o gargalo de abrir
+            conexao e esperar resposta por tecla.
+          * Wi-Fi: em paralelo (conexoes independentes), caminho normal.
+        As teclas vem de _switch_codes (sem ler o estado antes).
         """
         targets = [d for d in self._devices
                    if self._kind(d) in ("switch", "light")]
-
-        def do_one(dev):
-            state = self.get_state(dev["id"])
-            if not state.get("online"):
-                return (0, 0, 1)  # (ok, falhas, offline)
-            codes = list((state.get("switches") or {}).keys()) or ["switch_1"]
-            ok = fail = 0
-            for code in codes:
-                if self.set_switch(dev["id"], code, on).get("ok"):
-                    ok += 1
-                else:
-                    fail += 1
-            return (ok, fail, 0)
+        zigbee = [d for d in targets if self._is_zigbee(d)]
+        others = [d for d in targets if not self._is_zigbee(d)]
 
         ok = fail = offline = 0
-        if targets:
+
+        # --- Zigbee: rajada nowait numa passagem so (por Hub) ---
+        for dev in zigbee:
+            with self._io_lock_for(dev):
+                sub = self._sub_local(dev)
+                if sub is None:
+                    offline += 1
+                    continue
+                acted = False
+                for code in self._switch_codes(dev):
+                    dp = _DP_LIGHT_SWITCH if code == "switch_1" else code.replace("switch_", "")
+                    try:
+                        sub.set_value(dp, bool(on), nowait=True)
+                        ok += 1
+                        acted = True
+                    except Exception:
+                        fail += 1
+                if not acted:
+                    offline += 1
+
+        # --- Wi-Fi / nuvem: em paralelo (conexoes independentes) ---
+        def do_one(dev):
+            o = f = 0
+            for code in self._switch_codes(dev):
+                r = self.set_switch(dev["id"], code, on)
+                if r.get("ok"):
+                    o += 1
+                elif r.get("error"):
+                    f += 1
+            return (o, f, 1 if o == 0 else 0)
+
+        if others:
             with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(8, len(targets))) as ex:
-                for o, f, off in ex.map(do_one, targets):
+                    max_workers=min(8, len(others))) as ex:
+                for o, f, off in ex.map(do_one, others):
                     ok += o
                     fail += f
                     offline += off
+
         return {"ok": True, "on": bool(on), "devices": len(targets),
                 "switched": ok, "failed": fail, "offline": offline}

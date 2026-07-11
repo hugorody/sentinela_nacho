@@ -81,6 +81,10 @@ def sync_devices(env_path=ENV, out_path=OUT, listen_seconds=8.0):
             "version": seen.get("version") or str(d.get("version", "3.3")),
             "category": d.get("category", ""),
             "product_name": d.get("product_name", ""),
+            # Zigbee/sub-dispositivo: controlado LOCALMENTE atraves do Hub
+            # (gateway_id) usando o node_id como 'cid'. Vazio = Wi-Fi direto.
+            "node_id": d.get("node_id", ""),
+            "gateway_id": d.get("gateway_id", ""),
         })
 
     Path(out_path).write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")

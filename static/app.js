@@ -900,7 +900,7 @@ function renderSmartHome(devs) {
         <span class="sh-ic">${SH_KIND_ICON[d.kind] || '•'}</span>
         <div class="sh-title">
           <div class="sh-name" title="Clique para renomear">${esc(d.name || '…' + d.id.slice(-4))}</div>
-          <div class="sh-sub muted">${d.via === 'lan' ? 'Wi-Fi local' : 'via Hub/nuvem'}
+          <div class="sh-sub muted">${{ lan: 'Wi-Fi local', hub: 'Zigbee (Hub, local)', cloud: 'via nuvem' }[d.via] || d.via}
             · <span class="sh-online">—</span></div>
         </div>
       </div>
