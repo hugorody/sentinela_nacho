@@ -236,6 +236,11 @@ body {
 .alarm-recip { background: #0d1117; border: 1px solid var(--line); color: var(--fg);
   border-radius: 8px; padding: 8px 10px; font-size: 14px; }
 .alarm-actions { display: flex; gap: 8px; margin-top: 4px; }
+.alarm-section-title { font-size: 15px; font-weight: 600; margin: 22px 0 6px; }
+.alarm-section-title:first-of-type { margin-top: 6px; }
+.alarm-trigger { display: flex; gap: 8px; }
+.alarm-trigger select { flex: 1; background: #0d1117; border: 1px solid var(--line); color: var(--fg);
+  border-radius: 8px; padding: 8px 10px; font-size: 14px; color-scheme: dark; }
 
 /* --- Smart home --- */
 .sh-bar-actions { display: flex; gap: 8px; }

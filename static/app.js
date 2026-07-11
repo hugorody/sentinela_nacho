@@ -412,17 +412,21 @@ async function loadRecordings() {
 }
 $('#btnRecRefresh').onclick = loadRecordings;
 
-/* ---------- Alarmes (e-mail de pessoa não identificada) ---------- */
-let ALARM_CFG = { email: '', cameras: {} };
+/* ---------- Alarmes (e-mail: pessoa não identificada e sensores smart) ---------- */
+let ALARM_CFG = { email: '', cameras: {}, devices: {} };
+let ALARM_SENSOR_LABELS = {};
 
 async function loadAlarms() {
-  let data = { config: { email: '', cameras: {} }, cameras: [] };
+  let data = { config: { email: '', cameras: {}, devices: {} }, cameras: [], sensors: [] };
   try { data = await api('/api/alarms'); }
   catch { toast('Falha ao carregar alarmes', 'err'); }
   if (VIEW !== 'alarms') return;
-  ALARM_CFG = data.config || { email: '', cameras: {} };
+  ALARM_CFG = data.config || { email: '', cameras: {}, devices: {} };
+  ALARM_CFG.devices = ALARM_CFG.devices || {};
+  ALARM_SENSOR_LABELS = data.sensor_labels || {};
   $('#alarmEmail').value = ALARM_CFG.email || '';
   renderAlarms(data.cameras || []);
+  renderAlarmDevices(data.sensors || []);
 }
 
 function renderAlarms(cams) {
@@ -517,6 +521,165 @@ async function saveAlarmCamera(camera, fields) {
       body: JSON.stringify({ camera, ...fields })
     });
     if (r.config) ALARM_CFG = r.config;
+  } catch (e) { toast('Falha ao salvar alarme', 'err'); }
+}
+
+/* ---------- Alarmes de dispositivos smart (sensores) ---------- */
+
+// Ordem preferida dos estados de sensor (porta primeiro, como nas Cenas).
+const SENSOR_CODE_ORDER = ['doorcontact_state', 'pir', 'presence_state',
+  'watersensor_state', 'smoke_sensor_status', 'temper_alarm'];
+
+function sensorCodes() {
+  return Object.keys(ALARM_SENSOR_LABELS).sort(
+    (a, b) => SENSOR_CODE_ORDER.indexOf(a) - SENSOR_CODE_ORDER.indexOf(b));
+}
+
+// Texto de gatilho para um code+direção. Ex.: doorcontact_state/on -> "aberta".
+function sensorStateText(code, dir) {
+  const spec = ALARM_SENSOR_LABELS[code] || [code, 'ligado', 'desligado'];
+  if (dir === 'off') return spec[2];
+  if (dir === 'any') return 'mudar de estado';
+  return spec[1];
+}
+
+function sensorName(code) {
+  return (ALARM_SENSOR_LABELS[code] || [code])[0];
+}
+
+function renderAlarmDevices(sensors) {
+  $('#alarmDevEmpty').hidden = sensors.length > 0;
+  const grid = $('#alarmDevGrid'); grid.innerHTML = '';
+  const codes = sensorCodes();
+  for (const sensor of sensors) {
+    // Para cada sensor, o alarme é por (device, code). Achamos a config
+    // existente (se houver, respeitando qual code já foi escolhido) ou usamos o
+    // primeiro estado disponível como padrão.
+    const existingKey = Object.keys(ALARM_CFG.devices)
+      .find(k => k.startsWith(sensor.id + '|'));
+    let code = existingKey ? existingKey.split('|')[1] : (codes[0] || 'doorcontact_state');
+    let cfg = ALARM_CFG.devices[sensor.id + '|' + code] ||
+      { enabled: false, windows: [], recipients: '', trigger: 'on' };
+
+    const card = document.createElement('div');
+    card.className = 'alarm-card' + (cfg.enabled ? ' on' : '');
+    card.innerHTML = `
+      <div class="alarm-head">
+        <div class="alarm-title">${esc(sensor.name)}</div>
+        <button class="sh-toggle ${cfg.enabled ? 'on' : ''}" role="switch" aria-checked="${cfg.enabled}">
+          <span class="knob"></span>
+        </button>
+      </div>
+      <div class="alarm-body">
+        <label class="alarm-lbl">Avisar quando</label>
+        <div class="alarm-trigger">
+          <select class="alarm-dev-code"></select>
+          <select class="alarm-dev-dir"></select>
+        </div>
+        <label class="alarm-lbl">Horários ativos <span class="muted">(vazio = 24h)</span></label>
+        <div class="alarm-windows"></div>
+        <button class="btn small alarm-add-win">+ Adicionar horário</button>
+        <label class="alarm-lbl">Destinatário deste sensor <span class="muted">(opcional)</span></label>
+        <input class="alarm-recip" type="text" placeholder="usa o e-mail padrão se vazio" value="${(cfg.recipients || '').replace(/"/g, '&quot;')}">
+        <div class="alarm-actions">
+          <button class="btn small alarm-test">Enviar teste</button>
+        </div>
+      </div>`;
+
+    // Seletor do estado (code) do sensor.
+    const codeSel = card.querySelector('.alarm-dev-code');
+    codeSel.innerHTML = codes.map(c =>
+      `<option value="${esc(c)}"${c === code ? ' selected' : ''}>${esc(sensorName(c))}</option>`).join('');
+
+    const dirSel = card.querySelector('.alarm-dev-dir');
+    const fillDirs = () => {
+      dirSel.innerHTML = ['on', 'off', 'any'].map(d =>
+        `<option value="${d}"${d === (cfg.trigger || 'on') ? ' selected' : ''}>${esc(sensorStateText(code, d))}</option>`).join('');
+    };
+    fillDirs();
+
+    const winWrap = card.querySelector('.alarm-windows');
+    let windows = (cfg.windows || []).map(w => ({ ...w }));
+    const save = (fields) => saveAlarmDevice(sensor.id, code, fields);
+
+    // Ao trocar o estado observado, migramos para a config daquele (device,code).
+    codeSel.onchange = () => {
+      code = codeSel.value;
+      cfg = ALARM_CFG.devices[sensor.id + '|' + code] ||
+        { enabled: cfg.enabled, windows, recipients: card.querySelector('.alarm-recip').value.trim(), trigger: 'on' };
+      windows = (cfg.windows || []).map(w => ({ ...w }));
+      fillDirs();
+      renderWindows();
+      // Persiste o estado atual sob a nova chave (inclui enabled/trigger/janelas).
+      save({ enabled: cfg.enabled, trigger: dirSel.value, windows,
+        recipients: card.querySelector('.alarm-recip').value.trim() });
+    };
+    dirSel.onchange = () => save({ trigger: dirSel.value });
+
+    // Toggle ativar/desativar.
+    const toggle = card.querySelector('.sh-toggle');
+    toggle.onclick = () => {
+      const on = !toggle.classList.contains('on');
+      cfg.enabled = on;
+      save({ enabled: on, trigger: dirSel.value });
+      toggle.classList.toggle('on', on);
+      card.classList.toggle('on', on);
+    };
+
+    // Janelas de horário.
+    const renderWindows = () => {
+      winWrap.innerHTML = '';
+      if (!windows.length) {
+        winWrap.innerHTML = '<div class="muted alarm-247">Ativo 24 horas</div>';
+      }
+      windows.forEach((w, i) => {
+        const row = document.createElement('div');
+        row.className = 'alarm-win';
+        row.innerHTML = `
+          <input type="time" class="win-start" value="${esc(w.start || '22:00')}">
+          <span>até</span>
+          <input type="time" class="win-end" value="${esc(w.end || '06:00')}">
+          <button class="win-del" title="Remover">✕</button>`;
+        row.querySelector('.win-start').onchange = (e) => { windows[i].start = e.target.value; save({ windows }); };
+        row.querySelector('.win-end').onchange = (e) => { windows[i].end = e.target.value; save({ windows }); };
+        row.querySelector('.win-del').onclick = () => { windows.splice(i, 1); renderWindows(); save({ windows }); };
+        winWrap.appendChild(row);
+      });
+    };
+    card.querySelector('.alarm-add-win').onclick = () => {
+      windows.push({ start: '22:00', end: '06:00' });
+      renderWindows(); save({ windows });
+    };
+    renderWindows();
+
+    // Destinatário específico.
+    const recip = card.querySelector('.alarm-recip');
+    recip.onchange = () => save({ recipients: recip.value.trim() });
+
+    // Teste.
+    card.querySelector('.alarm-test').onclick = async (e) => {
+      const b = e.target; b.disabled = true; b.textContent = 'Enviando…';
+      try {
+        const r = await api('/api/alarms/device_test', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device: sensor.id, code, label: sensor.name })
+        });
+        toast(r.ok ? ('E-mail de teste enviado para ' + (r.recipients || []).join(', ')) : (r.error || 'Falha'), r.ok ? 'ok' : 'err');
+      } catch (err) { toast('Falha ao enviar teste', 'err'); }
+      b.disabled = false; b.textContent = 'Enviar teste';
+    };
+
+    grid.appendChild(card);
+  }
+}
+
+async function saveAlarmDevice(device, code, fields) {
+  try {
+    const r = await api('/api/alarms/device', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device, code, ...fields })
+    });
+    if (r.config) { ALARM_CFG = r.config; ALARM_CFG.devices = ALARM_CFG.devices || {}; }
   } catch (e) { toast('Falha ao salvar alarme', 'err'); }
 }
 
@@ -1126,7 +1289,11 @@ async function syncSmartHome() {
     if (r.added && r.added.length) msg += ` · novo(s): ${r.added.join(', ')}`;
     if (r.removed && r.removed.length) msg += ` · removido(s): ${r.removed.join(', ')}`;
     toast(msg, 'ok');
+    // Recarrega a aba atual que dependa da lista de dispositivos, para que
+    // sensores/aparelhos novos apareçam sem precisar de F5.
     if (VIEW === 'smarthome') loadSmartHome();
+    else if (VIEW === 'alarms') loadAlarms();
+    else if (VIEW === 'scenes') loadScenes();
   } catch (e) {
     toast('Falha ao sincronizar: ' + (e.message || ''), 'err');
   }

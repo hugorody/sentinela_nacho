@@ -45,6 +45,11 @@ SCENES = scenes_mod.SceneManager(controller=TUYA)
 ENGINE.on_camera_event = SCENES.on_camera_event
 SCENES.start()
 
+# Alarmes de dispositivos smart: o mesmo AlarmManager das cameras tambem le os
+# sensores (porta, movimento...) por polling e manda e-mail nas transicoes.
+ENGINE.alarms.attach_controller(TUYA)
+ENGINE.alarms.start_device_poll()
+
 app = Flask(__name__)
 
 
@@ -281,6 +286,8 @@ def api_smarthome_sync():
     if TUYA is None:
         TUYA = tuya_control.Controller()
         SCENES.controller = TUYA
+        ENGINE.alarms.attach_controller(TUYA)
+        ENGINE.alarms.start_device_poll()
     else:
         TUYA.reload()
     return jsonify({
@@ -339,10 +346,24 @@ def api_smarthome_label():
 
 @app.route("/api/alarms")
 def api_alarms():
-    """Config de alarmes + lista de cameras (para casar cada uma com sua config)."""
+    """Config de alarmes + cameras e sensores smart (para casar cada um com sua
+    config)."""
     cfg = ENGINE.alarms.get_config()
     cams = [{"id": c["id"], "name": c["name"]} for c in ENGINE.cameras]
-    return jsonify({"config": cfg, "cameras": cams})
+    # Sensores smart: dispositivos cujo kind e 'sensor' expoem estados (porta,
+    # movimento...) que servem de gatilho de alarme.
+    sensors = []
+    if TUYA is not None:
+        for d in TUYA.list_devices():
+            if d.get("kind") == "sensor":
+                sensors.append({"id": d["id"], "name": d.get("name") or d["id"]})
+    return jsonify({
+        "config": cfg,
+        "cameras": cams,
+        "sensors": sensors,
+        "sensor_labels": tuya_control.SENSOR_LABELS,
+        "smart_ready": TUYA is not None,
+    })
 
 
 @app.post("/api/alarms/email")
@@ -371,6 +392,32 @@ def api_alarms_test():
     """Envia um e-mail de teste para os destinatarios da camera indicada."""
     data = request.get_json(force=True, silent=True) or {}
     res = ENGINE.alarms.send_test(data.get("camera"))
+    return jsonify(res), (200 if res.get("ok") else 400)
+
+
+@app.post("/api/alarms/device")
+def api_alarms_device():
+    """Atualiza o alarme de um sensor smart (enabled/windows/recipients/trigger).
+
+    Identificado por (device + code), ex.: porta -> doorcontact_state."""
+    data = request.get_json(force=True, silent=True) or {}
+    ok = ENGINE.alarms.set_device(
+        data.get("device"),
+        data.get("code"),
+        enabled=data.get("enabled"),
+        windows=data.get("windows"),
+        recipients=data.get("recipients"),
+        trigger=data.get("trigger"),
+    )
+    return jsonify({"ok": ok, "config": ENGINE.alarms.get_config()})
+
+
+@app.post("/api/alarms/device_test")
+def api_alarms_device_test():
+    """Envia um e-mail de teste para os destinatarios de um alarme de sensor."""
+    data = request.get_json(force=True, silent=True) or {}
+    res = ENGINE.alarms.send_device_test(
+        data.get("device"), data.get("code"), data.get("label") or "Dispositivo")
     return jsonify(res), (200 if res.get("ok") else 400)
 
 

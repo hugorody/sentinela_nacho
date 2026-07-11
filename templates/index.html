@@ -138,6 +138,7 @@
           <button class="btn primary" id="btnAlarmEmail">Salvar</button>
         </div>
       </div>
+      <h3 class="alarm-section-title">Câmeras</h3>
       <p class="muted" style="margin:0 0 14px">
         Quando uma câmera com alarme <b>ativado</b> vê alguém <b>não identificado</b>
         dentro do horário configurado, você recebe um e-mail com um screenshot.
@@ -145,6 +146,17 @@
       <div class="grid alarm-grid" id="alarmGrid"></div>
       <div class="empty" id="alarmEmpty" hidden>
         Nenhuma câmera cadastrada. Adicione câmeras na aba <b>Câmeras</b> primeiro.
+      </div>
+
+      <h3 class="alarm-section-title">Dispositivos smart</h3>
+      <p class="muted" style="margin:0 0 14px">
+        Quando um sensor <b>ativado</b> muda de estado (ex.: a porta de serviço
+        <b>abre</b>) dentro do horário configurado, você recebe um e-mail.
+      </p>
+      <div class="grid alarm-grid" id="alarmDevGrid"></div>
+      <div class="empty" id="alarmDevEmpty" hidden>
+        Nenhum sensor smart encontrado. Sincronize seus dispositivos na aba
+        <b>Smart home</b> primeiro.
       </div>
     </section>
 
