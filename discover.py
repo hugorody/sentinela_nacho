@@ -207,6 +207,21 @@ def _build_rtsp(ip, user, password, path, port=RTSP_PORT):
     return f"rtsp://{cred}{ip}:{port}{path}"
 
 
+def normalize_rtsp_url(url):
+    """Limpa a URL informada manualmente e garante o esquema rtsp://.
+
+    Nao reescreve URLs ja validas (so tira espacos e prefixo ausente); serve
+    para o campo "adicionar camera" aceitar coisas como "192.168.0.10:554/..."
+    ou uma URL com espacos coladas do teclado.
+    """
+    url = (url or "").strip()
+    if not url:
+        return url
+    if "://" not in url:
+        url = "rtsp://" + url
+    return url
+
+
 # --- Sondagem RTSP DESCRIBE (leve, le codigo de status) -------------------
 # Evita o bloqueio por tentativas: 1 requisicao por senha para descobrir a
 # credencial certa (401 = errada, 2xx/4xx-de-path = autenticou), depois busca
