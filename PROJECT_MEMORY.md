@@ -197,6 +197,18 @@ Próxima etapa do Nacho:
 - O Sentinela publica somente a CA pública em `/nacho-ca.crt` para instalação.
 - No iPhone, instalar o perfil não basta: ativar confiança total em Ajustes >
   Geral > Sobre > Ajustes de Certificados Confiáveis.
+- Se o Safari mostrar “Não Seguro”, a origem não é um secure context e o
+  microfone continuará bloqueado. O frontend agora detecta `isSecureContext` e
+  orienta a instalar/ativar a CA, em vez de mostrar a exceção técnica em inglês.
+- Com HTTPS confiável e ícone laranja do microfone, uma exceção inglesa
+  `request is not allowed` foi atribuída à política de autoplay do Safari após
+  resposta assíncrona. A saída passou a usar um `AudioContext` destravado no
+  toque inicial. O upload também preserva o formato nativo do MediaRecorder:
+  Safari envia M4A/MP4, enquanto Chrome normalmente envia WebM/Opus.
+- Como ainda não foi possível escutar a resposta no iPhone, o destravamento do
+  áudio passou a iniciar um buffer silencioso no toque inicial, o gravador
+  prefere explicitamente `audio/mp4` em navegadores Apple e a reprodução tem
+  fallback por elemento `<audio>` caso `decodeAudioData` falhe.
 - Se o IP mudar, regenerar certificado e reinstalar a CA.
 
 ## Validações já executadas

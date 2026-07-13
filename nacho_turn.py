@@ -38,13 +38,16 @@ def _request(path, body, content_type, timeout=60):
 
 def _multipart_audio(audio, filename="speech.webm"):
     boundary = "----nacho-turn-" + secrets.token_hex(12)
+    suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else "webm"
+    mime = {"m4a": "audio/mp4", "mp4": "audio/mp4", "ogg": "audio/ogg",
+            "wav": "audio/wav", "mp3": "audio/mpeg"}.get(suffix, "audio/webm")
     parts = [
         f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
         "gpt-4o-mini-transcribe\r\n".encode(),
         f"--{boundary}\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n"
         "pt\r\n".encode(),
         f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
-        f"filename=\"{filename}\"\r\nContent-Type: audio/webm\r\n\r\n".encode(),
+        f"filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n".encode(),
         audio, b"\r\n", f"--{boundary}--\r\n".encode(),
     ]
     return b"".join(parts), "multipart/form-data; boundary=" + boundary
@@ -109,7 +112,8 @@ def answer(question, sentinela=None, previous_response_id=None):
 
 def synthesize(text):
     payload = {"model": "gpt-4o-mini-tts", "voice": envutil.get("nacho_voice") or "marin",
-               "input": text, "instructions": "Fale em português brasileiro, com tom acolhedor."}
+               "input": text, "response_format": "mp3",
+               "instructions": "Fale em português brasileiro, com tom acolhedor."}
     audio, _ = _request("/audio/speech", json.dumps(payload, ensure_ascii=False).encode(),
                         "application/json", timeout=60)
     return base64.b64encode(audio).decode("ascii")

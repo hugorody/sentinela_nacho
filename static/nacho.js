@@ -42,6 +42,82 @@ let speechStartedAt = 0;
 let turnStartedAt = 0;
 let finishingTurn = false;
 let turnAbort = null;
+let playbackContext = null;
+let playbackSource = null;
+let playbackElement = null;
+let playbackUrl = '';
+let playbackUnlocked = false;
+
+function isAppleBrowser() {
+  return /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)
+    && navigator.maxTouchPoints > 0;
+}
+
+function unlockPlayback() {
+  if (!playbackElement) {
+    playbackElement = document.createElement('audio');
+    playbackElement.setAttribute('playsinline', '');
+    playbackElement.preload = 'auto';
+    playbackElement.volume = 1;
+    playbackElement.muted = false;
+  }
+  if (isAppleBrowser() && !playbackUnlocked) {
+    playbackElement.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA';
+    playbackElement.play().then(() => { playbackUnlocked = true; }).catch(() => {});
+  }
+  if (!playbackContext) {
+    playbackContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (playbackContext.state === 'suspended') playbackContext.resume().catch(() => {});
+  if (!playbackUnlocked) {
+    const silence = playbackContext.createBuffer(1, 1, 22050);
+    const source = playbackContext.createBufferSource();
+    source.buffer = silence;
+    source.connect(playbackContext.destination);
+    try {
+      source.start(0);
+      playbackUnlocked = true;
+    } catch {}
+  }
+}
+
+async function playWithAudioElement(bytes) {
+  detail.textContent = 'Áudio recebido · usando alto-falante do aparelho';
+  if (playbackUrl) URL.revokeObjectURL(playbackUrl);
+  playbackUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+  playbackElement.src = playbackUrl;
+  playbackElement.volume = 1;
+  playbackElement.muted = false;
+  await playbackElement.play();
+  return new Promise((resolve, reject) => {
+    playbackElement.addEventListener('ended', resolve, { once: true });
+    playbackElement.addEventListener('error', () => reject(
+      new Error('Falha do reprodutor: código ' + (playbackElement.error?.code || '?'))
+    ), { once: true });
+  });
+}
+
+async function playResponseAudio(base64Audio) {
+  unlockPlayback();
+  const binary = atob(base64Audio);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  if (isAppleBrowser()) return playWithAudioElement(bytes);
+  if (playbackContext.state === 'suspended') await playbackContext.resume();
+  try {
+    const buffer = await playbackContext.decodeAudioData(bytes.buffer.slice(0));
+    playbackSource = playbackContext.createBufferSource();
+    playbackSource.buffer = buffer;
+    playbackSource.connect(playbackContext.destination);
+    return await new Promise((resolve, reject) => {
+      playbackSource.addEventListener('ended', resolve, { once: true });
+      try { playbackSource.start(); } catch (error) { reject(error); }
+    });
+  } catch (error) {
+    console.warn('Web Audio playback failed, trying HTML audio:', error);
+    return playWithAudioElement(bytes);
+  }
+}
 
 function setState(next, customDetail = '') {
   state = next;
@@ -90,6 +166,10 @@ function animateLevel() {
 }
 
 async function openMicrophone() {
+  if (!window.isSecureContext) {
+    setState('error', 'Certificado não confiável · instale e ative a CA do Nacho no iPhone');
+    return null;
+  }
   if (!navigator.mediaDevices?.getUserMedia) {
     setState('error', 'Este navegador exige HTTPS para liberar o microfone');
     return null;
@@ -104,9 +184,10 @@ async function openMicrophone() {
     context.createMediaStreamSource(stream).connect(analyser);
     return stream;
   } catch (error) {
-    setState('error', error.name === 'NotAllowedError'
-      ? 'Autorize o microfone nas configurações do navegador'
-      : 'Não foi possível iniciar o microfone');
+    const denied = error.name === 'NotAllowedError' || error.name === 'SecurityError';
+    setState('error', denied
+      ? 'No iPhone, autorize o microfone em Ajustes > Safari > Microfone'
+      : 'Não foi possível iniciar o microfone neste aparelho');
     return null;
   }
 }
@@ -115,6 +196,14 @@ async function stopInteraction(message = '') {
   conversationActive = false;
   previousResponseId = '';
   turnAbort?.abort(); turnAbort = null;
+  if (playbackSource) {
+    try { playbackSource.stop(); } catch {}
+    playbackSource = null;
+  }
+  if (playbackElement) {
+    playbackElement.pause();
+    playbackElement.currentTime = 0;
+  }
   if (turnRecorder?.state === 'recording') {
     try { turnRecorder.stop(); } catch {}
   }
@@ -159,9 +248,16 @@ async function startTurnMode(reason = '', existingMic = null) {
   speechStartedAt = 0;
   turnStartedAt = performance.now();
   finishingTurn = false;
-  const preferred = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus' : '';
-  turnRecorder = new MediaRecorder(mic, preferred ? { mimeType: preferred } : undefined);
+  const preferred = isAppleBrowser() && MediaRecorder.isTypeSupported('audio/mp4')
+    ? 'audio/mp4'
+    : (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : '');
+  try {
+    turnRecorder = new MediaRecorder(mic, preferred ? { mimeType: preferred } : undefined);
+  } catch (error) {
+    setState('error', 'O Safari não conseguiu iniciar a gravação do microfone');
+    return;
+  }
   turnRecorder.addEventListener('dataavailable', event => {
     if (event.data.size) turnChunks.push(event.data);
   });
@@ -189,7 +285,9 @@ async function finishTurnMode() {
   setState('thinking', 'Entendendo e preparando a resposta');
   try {
     const form = new FormData();
-    form.append('audio', blob, 'speech.webm');
+    const extension = recorder.mimeType.includes('mp4') ? 'm4a'
+      : (recorder.mimeType.includes('ogg') ? 'ogg' : 'webm');
+    form.append('audio', blob, 'speech.' + extension);
     if (previousResponseId) form.append('previous_response_id', previousResponseId);
     turnAbort = new AbortController();
     const response = await fetch('/api/voice/turn', {
@@ -200,23 +298,25 @@ async function finishTurnMode() {
     if (!response.ok || !data.audio) throw new Error(data.error || 'Falha ao processar a fala');
     if (!conversationActive) return;
     previousResponseId = data.response_id || previousResponseId;
-    const audio = new Audio('data:audio/mpeg;base64,' + data.audio);
-    remoteAudio = audio;
-    audio.addEventListener('playing', () => setState('speaking'));
-    audio.addEventListener('ended', () => {
-      remoteAudio = null;
-      if (conversationActive) {
-        setState('thinking', 'Pode continuar quando quiser');
-        window.setTimeout(() => {
-          if (conversationActive) startTurnMode('Pode continuar falando');
-        }, 850);
-      } else setState('idle');
-    });
-    audio.addEventListener('error', () => setState('error', 'Não foi possível reproduzir a resposta'));
-    await audio.play();
+    setState('speaking', 'Resposta recebida · reproduzindo voz');
+    await playResponseAudio(data.audio);
+    playbackSource = null;
+    if (playbackUrl) {
+      URL.revokeObjectURL(playbackUrl);
+      playbackUrl = '';
+    }
+    if (conversationActive) {
+      setState('thinking', 'Pode continuar quando quiser');
+      window.setTimeout(() => {
+        if (conversationActive) startTurnMode('Pode continuar falando');
+      }, 850);
+    } else setState('idle');
   } catch (error) {
     if (error.name !== 'AbortError') {
-      setState('error', error.message || 'Falha no modo de voz compatível');
+      const playbackError = state === 'speaking';
+      setState('error', playbackError
+        ? 'A resposta chegou, mas o navegador bloqueou a reprodução do áudio'
+        : (error.message || 'Falha no modo de voz compatível'));
       window.setTimeout(() => {
         if (conversationActive && !turnRecorder) {
           startTurnMode('Não entendi; pode repetir');
@@ -401,6 +501,7 @@ async function startInteraction() {
 }
 
 button.addEventListener('click', () => {
+  unlockPlayback();
   if (conversationActive) stopInteraction('Conversa encerrada');
   else if (state !== 'thinking') {
     conversationActive = true;
