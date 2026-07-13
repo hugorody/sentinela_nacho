@@ -206,18 +206,23 @@
     <section class="view" id="view-network" hidden>
       <div class="subbar">
         <span class="muted" id="netCount">—</span>
-        <button class="btn primary" id="btnNetScan">Reescanear</button>
+        <button class="btn" id="btnNetScan">Atualizar agora</button>
+        <button class="btn primary" id="btnNetAnalysis">Análise completa</button>
       </div>
       <div class="net-table-wrap">
         <table class="net-table" id="netTable">
           <thead><tr>
-            <th>Dispositivo</th><th>IP</th><th>MAC</th><th>Fabricante</th><th>Serviços</th><th>Estado</th>
+            <th>Dispositivo</th><th>IP</th><th>MAC</th><th>Fabricante</th><th>Serviços</th><th>Presença</th><th>Última vez</th>
           </tr></thead>
           <tbody id="netBody"></tbody>
         </table>
       </div>
       <div class="empty" id="netEmpty" hidden>Nenhum dispositivo encontrado.</div>
-      <div class="empty" id="netLoading" hidden>Escaneando a rede…</div>
+      <div class="empty" id="netLoading" hidden>Analisando a rede…</div>
+      <div class="net-events">
+        <h3>Atividade recente</h3>
+        <div id="netEvents" class="net-event-list"></div>
+      </div>
     </section>
 
     <!-- View: Configurações -->

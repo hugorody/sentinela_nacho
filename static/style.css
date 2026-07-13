@@ -203,6 +203,21 @@ body {
 .net-table tbody tr:last-child td { border-bottom: 0; }
 .net-table tbody tr:hover { background: var(--panel-2); }
 .net-table tr.is-cam { background: var(--acc-dim); }
+.net-table tr.is-offline { opacity: .58; }
+.net-name { cursor: pointer; }
+.net-name-input { width: 170px; padding: 4px 7px; font-size: 13px; }
+.net-known { margin-left: 6px; border: 1px solid var(--line); background: transparent; color: var(--mut);
+  border-radius: 50%; width: 23px; height: 23px; cursor: pointer; }
+.net-known.on { color: var(--acc); border-color: var(--acc); background: var(--acc-dim); }
+.net-events { margin-top: 22px; }
+.net-events h3 { margin: 0 0 10px; font-size: 15px; }
+.net-event-list { display: grid; gap: 6px; }
+.net-event { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.net-event .muted { margin-left: auto; }
+.net-event-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--blue); }
+.net-event.offline .net-event-dot { background: var(--danger); }
+.net-event.online .net-event-dot { background: var(--acc); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .net-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
   margin-left: 6px; border: 1px solid var(--line); color: var(--mut); }

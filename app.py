@@ -24,7 +24,7 @@ import engine as engine_mod
 import envutil
 import face_panel
 import face_recog
-import netscan
+import network_monitor
 import scenes as scenes_mod
 import tuya_control
 import tuya_scan
@@ -38,6 +38,10 @@ ENGINE = engine_mod.Engine(config_path=CONFIG, face_log=FACE_LOG)
 # Controlador Tuya carregado sob demanda: so existe se tuya_devices.json estiver
 # presente (gerado por tuya_setup.py). Sem ele, a aba mostra so o scan local.
 TUYA = tuya_control.Controller() if Path(tuya_control.DEVICES).exists() else None
+
+# Inventario de rede: ping/ARP a cada 5 minutos, persistido localmente. A thread
+# e independente dos streams de camera e permanece praticamente ociosa entre scans.
+NETWORK = network_monitor.NetworkMonitor(config_path=CONFIG, interval=300)
 
 # Cenas (automacoes): usam o Controller para agir e recebem eventos de camera
 # do engine. O scheduler de horario roda num thread proprio.
@@ -53,10 +57,52 @@ ENGINE.alarms.start_device_poll()
 app = Flask(__name__)
 
 
+@app.before_request
+def ensure_network_monitor():
+    """Inicia uma unica vez no processo que realmente atende requisicoes."""
+    NETWORK.start()
+
+
 # --- Configuracoes (credenciais do .env editaveis pela interface) ----------
 # Cada campo declara: rotulo, se e segredo (mascarado na leitura) e uma ajuda
 # (tooltip) explicando como o usuario obtem aquela chave.
 SETTINGS_FIELDS = [
+    {
+        "key": "openai_api_key", "label": "OpenAI API Key", "secret": True,
+        "group": "Nacho (assistente de voz)",
+        "help": "Chave da API usada pelo servidor Nacho para criar sessões de voz. "
+                "Ela permanece no backend e nunca é enviada ao navegador. Configure "
+                "uma chave de projeto criada no painel da OpenAI.",
+    },
+    {
+        "key": "nacho_realtime_model", "label": "Modelo de voz", "secret": False,
+        "group": "Nacho (assistente de voz)",
+        "placeholder": "gpt-realtime-2.1",
+        "help": "Modelo usado pela sessão Realtime. Deixe vazio para usar o padrão "
+                "gpt-realtime-2.1.",
+    },
+    {
+        "key": "nacho_voice", "label": "Voz", "secret": False,
+        "group": "Nacho (assistente de voz)",
+        "placeholder": "marin",
+                "help": "Voz da resposta falada. Deixe vazio para usar marin.",
+    },
+    {
+        "key": "nacho_voice_transport", "label": "Transporte de voz", "secret": False,
+        "group": "Nacho (assistente de voz)", "type": "select",
+        "options": [
+            {"value": "http", "label": "HTTP por turnos (recomendado)"},
+            {"value": "realtime", "label": "WebRTC experimental"},
+        ],
+        "help": "HTTP grava uma pergunta por vez e funciona em mais redes e "
+                "navegadores. WebRTC tem menor latência, mas depende de ICE/UDP.",
+    },
+    {
+        "key": "nacho_pin", "label": "PIN de acesso", "secret": True,
+        "group": "Nacho (assistente de voz)",
+        "help": "Senha exigida uma vez pelo navegador para acessar o Nacho. "
+                "Configure antes de disponibilizá-lo para outros aparelhos da casa.",
+    },
     {
         "key": "resend_api_key", "label": "Resend API Key", "secret": True,
         "group": "E-mail (alarmes)",
@@ -124,6 +170,34 @@ def index():
 @app.route("/api/status")
 def api_status():
     return jsonify(ENGINE.status())
+
+
+@app.route("/nacho-ca.crt")
+def nacho_ca_certificate():
+    """Certificado público para instalar nos aparelhos da rede doméstica."""
+    cert = Path("certs/nacho-ca.crt")
+    if not cert.is_file():
+        abort(404)
+    return send_file(str(cert.resolve()), mimetype="application/x-x509-ca-cert",
+                     as_attachment=True, download_name="nacho-ca.crt")
+
+
+@app.route("/api/nacho/cameras")
+def api_nacho_cameras():
+    """Presença atual, somente leitura, para o assistente Nacho."""
+    cameras = []
+    for cam in ENGINE.cameras:
+        faces = cam.get("faces") or []
+        names = sorted({f.get("name") for f in faces if f.get("name")})
+        cameras.append({
+            "id": cam["id"], "name": cam["name"],
+            "online": cam.get("status") == "online",
+            "people": sum(1 for f in faces if f.get("good")),
+            "identified": names,
+            "unknown": sum(1 for f in faces if f.get("good") and "name" in f
+                           and not f.get("name")),
+        })
+    return jsonify({"cameras": cameras, "count": len(cameras)})
 
 
 @app.post("/api/start")
@@ -228,12 +302,39 @@ def recording_file(name):
 
 @app.route("/api/network")
 def api_network():
-    """Lista os dispositivos conectados na rede local."""
+    """Retorna imediatamente o ultimo inventario, sem iniciar uma varredura."""
+    devices = NETWORK.snapshot()
+    return jsonify({"devices": devices, "count": len(devices),
+                    "events": NETWORK.events(30)})
+
+
+@app.post("/api/network/scan")
+def api_network_scan():
+    """Atualizacao manual leve: somente ping/ARP."""
     try:
-        devices = netscan.scan_network(config_path=CONFIG)
+        devices = NETWORK.scan(full=False)
     except Exception as exc:
         return jsonify({"error": str(exc), "devices": []}), 500
-    return jsonify({"devices": devices, "count": len(devices)})
+    return jsonify({"devices": devices, "count": len(devices),
+                    "events": NETWORK.events(30)})
+
+
+@app.post("/api/network/analysis")
+def api_network_analysis():
+    """Analise completa sob demanda: portas conhecidas, mDNS e SSDP."""
+    try:
+        devices = NETWORK.scan(full=True)
+    except Exception as exc:
+        return jsonify({"error": str(exc), "devices": []}), 500
+    return jsonify({"devices": devices, "count": len(devices),
+                    "events": NETWORK.events(30)})
+
+
+@app.post("/api/network/device")
+def api_network_device():
+    data = request.get_json(force=True, silent=True) or {}
+    ok = NETWORK.update_device(data.get("mac"), data.get("name"), data.get("known"))
+    return jsonify({"ok": ok}), (200 if ok else 404)
 
 
 # --- Smart home (dispositivos Tuya) ----------------------------------------

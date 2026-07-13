@@ -338,8 +338,10 @@ $('#btnEnroll').onclick = async () => {
     const r = await api('/api/enroll', { method: 'POST' });
     if (r.ok) {
       const sq = (r.skipped_quality || []).length;
+      const so = (r.skipped_outlier || []).length;
       let msg = `Reconhecimento atualizado: ${r.total} amostra(s), ${Object.keys(r.people || {}).length} pessoa(s)`;
       if (sq) msg += ` · ${sq} ignorada(s) por baixa qualidade`;
+      if (so) msg += ` · ${so} inconsistente(s)`;
       toast(msg, 'ok'); refreshStatus();
     } else toast(r.error || 'Falha', 'err');
   } catch (e) { toast('Falha ao treinar', 'err'); }
@@ -1338,36 +1340,100 @@ function netTag(d) {
   return '';
 }
 
-async function loadNetwork() {
-  $('#netLoading').hidden = false;
+let NET_LOADING = false;
+let NET_EDITING = false;
+async function loadNetwork(mode = 'cache') {
+  if (NET_LOADING || (mode === 'cache' && NET_EDITING)) return;
+  NET_LOADING = true;
+  if (mode !== 'cache') $('#netLoading').hidden = false;
   $('#netEmpty').hidden = true;
-  $('#netTable').hidden = true;
-  let devs = [];
-  try { devs = (await api('/api/network')).devices || []; }
-  catch { toast('Falha ao escanear a rede', 'err'); }
+  let data = { devices: [], events: [] };
+  const path = mode === 'full' ? '/api/network/analysis' : (mode === 'quick' ? '/api/network/scan' : '/api/network');
+  try { data = await api(path, mode === 'cache' ? undefined : { method: 'POST' }); }
+  catch { toast('Falha ao carregar a rede', 'err'); }
+  NET_LOADING = false;
+  const devs = data.devices || [];
   $('#netLoading').hidden = true;
-  $('#netCount').textContent = devs.length + ' dispositivo(s) na rede';
+  const online = devs.filter(d => d.online).length;
+  $('#netCount').textContent = `${online} online · ${devs.length} no inventário`;
   $('#netEmpty').hidden = devs.length > 0;
   $('#netTable').hidden = devs.length === 0;
   const body = $('#netBody'); body.innerHTML = '';
   for (const d of devs) {
-    const name = esc(d.hostname || d.advert || d.vendor || '—');
+    const name = esc(d.custom_name || d.hostname || d.advert || d.vendor || '—');
     const svc = (d.services || []).length
       ? (d.services || []).map(s => `<span class="svc-tag">${esc(s)}</span>`).join(' ')
       : '<span class="muted">—</span>';
     const tr = document.createElement('tr');
-    if (d.is_camera) tr.className = 'is-cam';
+    tr.className = (d.is_camera ? 'is-cam ' : '') + (!d.online ? 'is-offline' : '');
     tr.innerHTML = `
-      <td><b>${name}</b> ${netTag(d)}</td>
+      <td><b class="net-name" title="Clique para nomear">${name}</b> ${netTag(d)}
+        <button class="net-known ${d.known ? 'on' : ''}" title="${d.known ? 'Dispositivo conhecido' : 'Marcar como conhecido'}">✓</button></td>
       <td class="mono">${esc(d.ip)}</td>
       <td class="mono muted">${esc(d.mac || '—')}</td>
       <td>${esc(d.vendor || '—')}</td>
       <td class="svc-cell">${svc}</td>
-      <td><span class="net-state ${d.state === 'REACHABLE' ? 'on' : ''}">${STATE_LABEL[d.state] || esc(d.state.toLowerCase())}</span></td>`;
+      <td><span class="net-state ${d.online ? 'on' : ''}">${d.online ? (d.missed_scans ? `confirmando ${d.missed_scans}/3` : 'online') : 'offline'}</span></td>
+      <td class="muted">${fmtDateTime(d.last_seen)}</td>`;
+    const nameEl = tr.querySelector('.net-name');
+    nameEl.onclick = () => editNetName(d.mac, nameEl);
+    tr.querySelector('.net-known').onclick = async () => {
+      await api('/api/network/device', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mac: d.mac, known: !d.known }) });
+      loadNetwork();
+    };
     body.appendChild(tr);
   }
+  const evLabels = { new: 'Novo dispositivo', online: 'Entrou na rede', offline: 'Saiu da rede' };
+  const events = data.events || [];
+  $('#netEvents').innerHTML = events.length ? events.map(e => `
+    <div class="net-event ${esc(e.event)}"><span class="net-event-dot"></span>
+      <b>${evLabels[e.event] || esc(e.event)}</b> · ${esc(e.label || e.ip)}
+      <span class="muted">${fmtDateTime(e.ts)}</span></div>`).join('')
+    : '<span class="muted">Nenhuma mudança registrada ainda.</span>';
 }
-$('#btnNetScan').onclick = loadNetwork;
+
+// Mesmo comportamento da edição do nome das câmeras: edita dentro da tabela,
+// Enter confirma, Escape cancela e sair do campo salva.
+function editNetName(mac, el) {
+  const cur = el.textContent;
+  const input = document.createElement('input');
+  input.className = 'cam-name-input net-name-input';
+  input.value = cur === '—' ? '' : cur;
+  el.replaceChildren(input);
+  NET_EDITING = true;
+  input.focus(); input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const v = input.value.trim();
+    const changed = save && v && v !== cur;
+    el.textContent = changed ? v : cur;
+    el.onclick = () => editNetName(mac, el);
+    NET_EDITING = false;
+    if (changed) {
+      try {
+        await api('/api/network/device', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mac, name: v })
+        });
+        toast('Dispositivo renomeado para "' + v + '"', 'ok');
+        loadNetwork();
+      } catch (e) { toast('Falha ao renomear', 'err'); }
+    }
+  };
+  input.onclick = (e) => e.stopPropagation();
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+$('#btnNetScan').onclick = () => loadNetwork('quick');
+$('#btnNetAnalysis').onclick = () => loadNetwork('full');
+// Atualiza apenas a exibicao do cache; nao gera ping nem trafego de descoberta.
+setInterval(() => { if (VIEW === 'network') loadNetwork('cache'); }, 15000);
 
 /* ---------- Configurações (credenciais do .env) ---------- */
 let SETTINGS_FIELDS = [];
