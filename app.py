@@ -24,8 +24,9 @@ import engine as engine_mod
 import envutil
 import face_panel
 import face_recog
-import netscan
+import network_monitor
 import scenes as scenes_mod
+import smartthings_control
 import tuya_control
 import tuya_scan
 import tuya_setup
@@ -38,6 +39,10 @@ ENGINE = engine_mod.Engine(config_path=CONFIG, face_log=FACE_LOG)
 # Controlador Tuya carregado sob demanda: so existe se tuya_devices.json estiver
 # presente (gerado por tuya_setup.py). Sem ele, a aba mostra so o scan local.
 TUYA = tuya_control.Controller() if Path(tuya_control.DEVICES).exists() else None
+
+# Inventario de rede: ping/ARP a cada 5 minutos, persistido localmente. A thread
+# e independente dos streams de camera e permanece praticamente ociosa entre scans.
+NETWORK = network_monitor.NetworkMonitor(config_path=CONFIG, interval=300)
 
 # Cenas (automacoes): usam o Controller para agir e recebem eventos de camera
 # do engine. O scheduler de horario roda num thread proprio.
@@ -53,10 +58,52 @@ ENGINE.alarms.start_device_poll()
 app = Flask(__name__)
 
 
+@app.before_request
+def ensure_network_monitor():
+    """Inicia uma unica vez no processo que realmente atende requisicoes."""
+    NETWORK.start()
+
+
 # --- Configuracoes (credenciais do .env editaveis pela interface) ----------
 # Cada campo declara: rotulo, se e segredo (mascarado na leitura) e uma ajuda
 # (tooltip) explicando como o usuario obtem aquela chave.
 SETTINGS_FIELDS = [
+    {
+        "key": "openai_api_key", "label": "OpenAI API Key", "secret": True,
+        "group": "Nacho (assistente de voz)",
+        "help": "Chave da API usada pelo servidor Nacho para criar sessões de voz. "
+                "Ela permanece no backend e nunca é enviada ao navegador. Configure "
+                "uma chave de projeto criada no painel da OpenAI.",
+    },
+    {
+        "key": "nacho_realtime_model", "label": "Modelo de voz", "secret": False,
+        "group": "Nacho (assistente de voz)",
+        "placeholder": "gpt-realtime-2.1",
+        "help": "Modelo usado pela sessão Realtime. Deixe vazio para usar o padrão "
+                "gpt-realtime-2.1.",
+    },
+    {
+        "key": "nacho_voice", "label": "Voz", "secret": False,
+        "group": "Nacho (assistente de voz)",
+        "placeholder": "marin",
+                "help": "Voz da resposta falada. Deixe vazio para usar marin.",
+    },
+    {
+        "key": "nacho_voice_transport", "label": "Transporte de voz", "secret": False,
+        "group": "Nacho (assistente de voz)", "type": "select",
+        "options": [
+            {"value": "http", "label": "HTTP por turnos (recomendado)"},
+            {"value": "realtime", "label": "WebRTC experimental"},
+        ],
+        "help": "HTTP grava uma pergunta por vez e funciona em mais redes e "
+                "navegadores. WebRTC tem menor latência, mas depende de ICE/UDP.",
+    },
+    {
+        "key": "nacho_pin", "label": "PIN de acesso", "secret": True,
+        "group": "Nacho (assistente de voz)",
+        "help": "Senha exigida uma vez pelo navegador para acessar o Nacho. "
+                "Configure antes de disponibilizá-lo para outros aparelhos da casa.",
+    },
     {
         "key": "resend_api_key", "label": "Resend API Key", "secret": True,
         "group": "E-mail (alarmes)",
@@ -101,6 +148,12 @@ SETTINGS_FIELDS = [
                 "Access ID na aba Overview de platform.tuya.com. Mantenha em "
                 "segredo.",
     },
+    {
+        "key": "smartthings_token", "label": "SmartThings · Token", "secret": True,
+        "group": "Smart home (Samsung TVs)",
+        "help": "Token da conta SmartThings com permissão para listar, consultar e "
+                "controlar dispositivos. Permanece somente no backend.",
+    },
 ]
 
 _SECRET_MASK = "••••••••"
@@ -124,6 +177,34 @@ def index():
 @app.route("/api/status")
 def api_status():
     return jsonify(ENGINE.status())
+
+
+@app.route("/nacho-ca.crt")
+def nacho_ca_certificate():
+    """Certificado público para instalar nos aparelhos da rede doméstica."""
+    cert = Path("certs/nacho-ca.crt")
+    if not cert.is_file():
+        abort(404)
+    return send_file(str(cert.resolve()), mimetype="application/x-x509-ca-cert",
+                     as_attachment=True, download_name="nacho-ca.crt")
+
+
+@app.route("/api/nacho/cameras")
+def api_nacho_cameras():
+    """Presença atual, somente leitura, para o assistente Nacho."""
+    cameras = []
+    for cam in ENGINE.cameras:
+        faces = cam.get("faces") or []
+        names = sorted({f.get("name") for f in faces if f.get("name")})
+        cameras.append({
+            "id": cam["id"], "name": cam["name"],
+            "online": cam.get("status") == "online",
+            "people": sum(1 for f in faces if f.get("good")),
+            "identified": names,
+            "unknown": sum(1 for f in faces if f.get("good") and "name" in f
+                           and not f.get("name")),
+        })
+    return jsonify({"cameras": cameras, "count": len(cameras)})
 
 
 @app.post("/api/start")
@@ -228,12 +309,39 @@ def recording_file(name):
 
 @app.route("/api/network")
 def api_network():
-    """Lista os dispositivos conectados na rede local."""
+    """Retorna imediatamente o ultimo inventario, sem iniciar uma varredura."""
+    devices = NETWORK.snapshot()
+    return jsonify({"devices": devices, "count": len(devices),
+                    "events": NETWORK.events(30)})
+
+
+@app.post("/api/network/scan")
+def api_network_scan():
+    """Atualizacao manual leve: somente ping/ARP."""
     try:
-        devices = netscan.scan_network(config_path=CONFIG)
+        devices = NETWORK.scan(full=False)
     except Exception as exc:
         return jsonify({"error": str(exc), "devices": []}), 500
-    return jsonify({"devices": devices, "count": len(devices)})
+    return jsonify({"devices": devices, "count": len(devices),
+                    "events": NETWORK.events(30)})
+
+
+@app.post("/api/network/analysis")
+def api_network_analysis():
+    """Analise completa sob demanda: portas conhecidas, mDNS e SSDP."""
+    try:
+        devices = NETWORK.scan(full=True)
+    except Exception as exc:
+        return jsonify({"error": str(exc), "devices": []}), 500
+    return jsonify({"devices": devices, "count": len(devices),
+                    "events": NETWORK.events(30)})
+
+
+@app.post("/api/network/device")
+def api_network_device():
+    data = request.get_json(force=True, silent=True) or {}
+    ok = NETWORK.update_device(data.get("mac"), data.get("name"), data.get("known"))
+    return jsonify({"ok": ok}), (200 if ok else 404)
 
 
 # --- Smart home (dispositivos Tuya) ----------------------------------------
@@ -332,6 +440,33 @@ def api_smarthome_all():
     return jsonify(TUYA.set_all(bool(data.get("on"))))
 
 
+@app.get("/api/smartthings/tvs")
+def api_smartthings_tvs():
+    try:
+        return jsonify({"configured": True, "tvs": smartthings_control.Controller().list_tvs()})
+    except smartthings_control.SmartThingsError as exc:
+        return jsonify({"configured": False, "error": str(exc), "tvs": []}), 400
+
+
+@app.get("/api/smartthings/tv/state/<path:name>")
+def api_smartthings_tv_state(name):
+    try:
+        return jsonify(smartthings_control.Controller().status(name))
+    except smartthings_control.SmartThingsError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/smartthings/tv/command")
+def api_smartthings_tv_command():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        result = smartthings_control.Controller().command(
+            data.get("tv"), data.get("action"), data.get("value"))
+        return jsonify(result), (200 if result.get("ok") else 502)
+    except (smartthings_control.SmartThingsError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.post("/api/smarthome/label")
 def api_smarthome_label():
     """Renomeia uma tecla/canal de um dispositivo (ex.: 'switch_1' -> 'Pia')."""
@@ -356,12 +491,14 @@ def api_alarms():
     if TUYA is not None:
         for d in TUYA.list_devices():
             if d.get("kind") == "sensor":
-                sensors.append({"id": d["id"], "name": d.get("name") or d["id"]})
+                sensors.append({"id": d["id"], "name": d.get("name") or d["id"],
+                                "readings": d.get("readings") or []})
     return jsonify({
         "config": cfg,
         "cameras": cams,
         "sensors": sensors,
         "sensor_labels": tuya_control.SENSOR_LABELS,
+        "reading_labels": tuya_control.READING_LABELS,
         "smart_ready": TUYA is not None,
     })
 
@@ -408,6 +545,8 @@ def api_alarms_device():
         windows=data.get("windows"),
         recipients=data.get("recipients"),
         trigger=data.get("trigger"),
+        op=data.get("op"),
+        threshold=data.get("threshold"),
     )
     return jsonify({"ok": ok, "config": ENGINE.alarms.get_config()})
 
@@ -435,6 +574,8 @@ def api_scenes():
         "smart_ready": TUYA is not None,
         # Rotulos dos estados de sensor (code -> [nome, textoLigado, textoDesligado]).
         "sensor_labels": tuya_control.SENSOR_LABELS,
+        # Rotulos das leituras numericas (reading -> [nome, unidade]).
+        "reading_labels": tuya_control.READING_LABELS,
     })
 
 

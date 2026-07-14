@@ -1,5 +1,6 @@
 # Ambiente virtual e caches
 venv/
+.venv/
 __pycache__/
 *.pyc
 
@@ -34,3 +35,11 @@ alarms.json
 
 # Cenas/automacoes do usuario
 scenes.json
+
+# Inventario e historico local da rede
+network_inventory.db
+network_inventory.db-shm
+network_inventory.db-wal
+
+# CA e chaves HTTPS locais do Nacho
+certs/

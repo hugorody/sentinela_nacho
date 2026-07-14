@@ -338,8 +338,10 @@ $('#btnEnroll').onclick = async () => {
     const r = await api('/api/enroll', { method: 'POST' });
     if (r.ok) {
       const sq = (r.skipped_quality || []).length;
+      const so = (r.skipped_outlier || []).length;
       let msg = `Reconhecimento atualizado: ${r.total} amostra(s), ${Object.keys(r.people || {}).length} pessoa(s)`;
       if (sq) msg += ` · ${sq} ignorada(s) por baixa qualidade`;
+      if (so) msg += ` · ${so} inconsistente(s)`;
       toast(msg, 'ok'); refreshStatus();
     } else toast(r.error || 'Falha', 'err');
   } catch (e) { toast('Falha ao treinar', 'err'); }
@@ -415,6 +417,7 @@ $('#btnRecRefresh').onclick = loadRecordings;
 /* ---------- Alarmes (e-mail: pessoa não identificada e sensores smart) ---------- */
 let ALARM_CFG = { email: '', cameras: {}, devices: {} };
 let ALARM_SENSOR_LABELS = {};
+let ALARM_READING_LABELS = {};   // reading -> [nome, unidade]
 
 async function loadAlarms() {
   let data = { config: { email: '', cameras: {}, devices: {} }, cameras: [], sensors: [] };
@@ -424,6 +427,7 @@ async function loadAlarms() {
   ALARM_CFG = data.config || { email: '', cameras: {}, devices: {} };
   ALARM_CFG.devices = ALARM_CFG.devices || {};
   ALARM_SENSOR_LABELS = data.sensor_labels || {};
+  ALARM_READING_LABELS = data.reading_labels || {};
   $('#alarmEmail').value = ALARM_CFG.email || '';
   renderAlarms(data.cameras || []);
   renderAlarmDevices(data.sensors || []);
@@ -544,14 +548,40 @@ function sensorStateText(code, dir) {
 }
 
 function sensorName(code) {
+  // Estado booleano (doorcontact_state...) ou leitura numérica (reading:temperature).
+  if (isReadingCode(code)) {
+    const r = code.split(':')[1];
+    return (ALARM_READING_LABELS[r] || [r])[0];
+  }
   return (ALARM_SENSOR_LABELS[code] || [code])[0];
+}
+
+// code de leitura numérica? (ex.: "reading:temperature")
+function isReadingCode(code) { return typeof code === 'string' && code.startsWith('reading:'); }
+
+// Config padrão de um alarme de sensor, conforme booleano ou numérico.
+function defaultDevCfg(code) {
+  const base = { enabled: false, windows: [], recipients: '' };
+  return isReadingCode(code)
+    ? { ...base, op: 'above', threshold: 30 }
+    : { ...base, trigger: 'on' };
+}
+
+// Unidade de uma leitura (ex.: reading:temperature -> "°C"). "" se desconhecida.
+function readingUnit(code) {
+  const r = (code || '').split(':')[1];
+  return (ALARM_READING_LABELS[r] || [r, ''])[1] || '';
 }
 
 function renderAlarmDevices(sensors) {
   $('#alarmDevEmpty').hidden = sensors.length > 0;
   const grid = $('#alarmDevGrid'); grid.innerHTML = '';
-  const codes = sensorCodes();
   for (const sensor of sensors) {
+    // Códigos que ESTE sensor oferece: os estados booleanos conhecidos (para
+    // sensores de porta/movimento) e/ou as leituras numéricas do próprio sensor
+    // (temperatura/umidade), expostas como "reading:<nome>".
+    const numeric = (sensor.readings || []).map(r => 'reading:' + r);
+    const codes = numeric.length ? numeric : sensorCodes();
     // Para cada sensor, o alarme é por (device, code). Achamos a config
     // existente (se houver, respeitando qual code já foi escolhido) ou usamos o
     // primeiro estado disponível como padrão.
@@ -559,7 +589,7 @@ function renderAlarmDevices(sensors) {
       .find(k => k.startsWith(sensor.id + '|'));
     let code = existingKey ? existingKey.split('|')[1] : (codes[0] || 'doorcontact_state');
     let cfg = ALARM_CFG.devices[sensor.id + '|' + code] ||
-      { enabled: false, windows: [], recipients: '', trigger: 'on' };
+      defaultDevCfg(code);
 
     const card = document.createElement('div');
     card.className = 'alarm-card' + (cfg.enabled ? ' on' : '');
@@ -574,7 +604,7 @@ function renderAlarmDevices(sensors) {
         <label class="alarm-lbl">Avisar quando</label>
         <div class="alarm-trigger">
           <select class="alarm-dev-code"></select>
-          <select class="alarm-dev-dir"></select>
+          <span class="alarm-dev-cond"></span>
         </div>
         <label class="alarm-lbl">Horários ativos <span class="muted">(vazio = 24h)</span></label>
         <div class="alarm-windows"></div>
@@ -591,37 +621,60 @@ function renderAlarmDevices(sensors) {
     codeSel.innerHTML = codes.map(c =>
       `<option value="${esc(c)}"${c === code ? ' selected' : ''}>${esc(sensorName(c))}</option>`).join('');
 
-    const dirSel = card.querySelector('.alarm-dev-dir');
-    const fillDirs = () => {
-      dirSel.innerHTML = ['on', 'off', 'any'].map(d =>
-        `<option value="${d}"${d === (cfg.trigger || 'on') ? ' selected' : ''}>${esc(sensorStateText(code, d))}</option>`).join('');
+    // Condição do alarme: para estado booleano é um dropdown (aberta/fechada…);
+    // para leitura numérica é "acima/abaixo de <valor><unidade>".
+    const condWrap = card.querySelector('.alarm-dev-cond');
+    const renderCond = () => {
+      if (isReadingCode(code)) {
+        const unit = esc(readingUnit(code));
+        const op = cfg.op || 'above';
+        condWrap.innerHTML = `
+          <select class="alarm-dev-op">
+            <option value="above"${op === 'above' ? ' selected' : ''}>acima de</option>
+            <option value="below"${op === 'below' ? ' selected' : ''}>abaixo de</option>
+          </select>
+          <input class="alarm-dev-thr" type="number" step="0.5" value="${esc(String(cfg.threshold ?? 30))}">
+          <span class="alarm-unit">${unit}</span>`;
+        condWrap.querySelector('.alarm-dev-op').onchange = (e) => { cfg.op = e.target.value; save({ op: cfg.op }); };
+        const thr = condWrap.querySelector('.alarm-dev-thr');
+        thr.onchange = () => { cfg.threshold = +thr.value; save({ threshold: cfg.threshold }); };
+      } else {
+        condWrap.innerHTML = `<select class="alarm-dev-dir">${['on', 'off', 'any'].map(d =>
+          `<option value="${d}"${d === (cfg.trigger || 'on') ? ' selected' : ''}>${esc(sensorStateText(code, d))}</option>`).join('')}</select>`;
+        condWrap.querySelector('.alarm-dev-dir').onchange = (e) => { cfg.trigger = e.target.value; save({ trigger: cfg.trigger }); };
+      }
     };
-    fillDirs();
+    renderCond();
 
     const winWrap = card.querySelector('.alarm-windows');
     let windows = (cfg.windows || []).map(w => ({ ...w }));
     const save = (fields) => saveAlarmDevice(sensor.id, code, fields);
 
+    // Campos de condição a persistir junto (variam por tipo de sensor).
+    const condFields = () => isReadingCode(code)
+      ? { op: cfg.op || 'above', threshold: cfg.threshold ?? 30 }
+      : { trigger: cfg.trigger || 'on' };
+
     // Ao trocar o estado observado, migramos para a config daquele (device,code).
     codeSel.onchange = () => {
       code = codeSel.value;
       cfg = ALARM_CFG.devices[sensor.id + '|' + code] ||
-        { enabled: cfg.enabled, windows, recipients: card.querySelector('.alarm-recip').value.trim(), trigger: 'on' };
+        { ...defaultDevCfg(code), enabled: cfg.enabled, windows,
+          recipients: card.querySelector('.alarm-recip').value.trim() };
       windows = (cfg.windows || []).map(w => ({ ...w }));
-      fillDirs();
+      renderCond();
       renderWindows();
-      // Persiste o estado atual sob a nova chave (inclui enabled/trigger/janelas).
-      save({ enabled: cfg.enabled, trigger: dirSel.value, windows,
-        recipients: card.querySelector('.alarm-recip').value.trim() });
+      // Persiste o estado atual sob a nova chave (inclui enabled/condição/janelas).
+      save({ enabled: cfg.enabled, windows,
+        recipients: card.querySelector('.alarm-recip').value.trim(), ...condFields() });
     };
-    dirSel.onchange = () => save({ trigger: dirSel.value });
 
     // Toggle ativar/desativar.
     const toggle = card.querySelector('.sh-toggle');
     toggle.onclick = () => {
       const on = !toggle.classList.contains('on');
       cfg.enabled = on;
-      save({ enabled: on, trigger: dirSel.value });
+      save({ enabled: on, ...condFields() });
       toggle.classList.toggle('on', on);
       card.classList.toggle('on', on);
     };
@@ -711,6 +764,11 @@ function devName(id) {
 }
 
 function codeLabel(deviceId, code) {
+  // Leitura numérica (ex.: reading:temperature -> "Temperatura").
+  if (typeof code === 'string' && code.startsWith('reading:')) {
+    const r = code.split(':')[1];
+    return (SCENE_DATA.reading_labels && SCENE_DATA.reading_labels[r] || [r])[0];
+  }
   // Sensores: nome amigável do estado (ex.: doorcontact_state -> "Porta").
   const sl = SCENE_DATA.sensor_labels && SCENE_DATA.sensor_labels[code];
   if (sl) return sl[0];
@@ -853,6 +911,9 @@ function openSceneModal(scene) {
   }
   fillDeviceCodes(devSel.value, t.code);
   $('#trigDevState').value = t.state || 'on';
+  // Gatilho numérico (temperatura/umidade): preenche op e limite.
+  $('#trigDevOp').value = t.op || 'above';
+  $('#trigDevThr').value = t.threshold != null ? t.threshold : 30;
   syncTriggerUI();
 
   // Ações.
@@ -882,6 +943,9 @@ function deviceCodes(deviceId) {
   // Sensores: os estados observáveis conhecidos (porta, movimento, bateria…).
   // Sensor de porta expõe doorcontact_state; deixamos ele em primeiro.
   if (d && d.kind === 'sensor') {
+    // Sensor de temperatura/umidade: só leituras numéricas (reading:*).
+    const numeric = (d.readings || []).map(r => 'reading:' + r);
+    if (numeric.length) return numeric;
     const known = Object.keys(SCENE_DATA.sensor_labels || {});
     const order = ['doorcontact_state', 'pir', 'presence_state',
       'watersensor_state', 'smoke_sensor_status', 'temper_alarm'];
@@ -917,8 +981,20 @@ function syncDevStateLabels() {
   const code = $('#trigDevCode').value;
   const stateSel = $('#trigDevState');
   const cur = stateSel.value;
-  const sl = SCENE_DATA.sensor_labels && SCENE_DATA.sensor_labels[code];
   const hintEl = $('#trigDevHint');
+  // Leitura numérica (temperatura/umidade): mostra "acima/abaixo de X"; esconde
+  // o dropdown de estado on/off.
+  const numeric = isReadingCode(code);
+  $('#trigDevStateCol').hidden = numeric;
+  $('#trigDevThrCol').hidden = !numeric;
+  if (numeric) {
+    const r = code.split(':')[1];
+    const unit = (SCENE_DATA.reading_labels && SCENE_DATA.reading_labels[r] || [r, ''])[1] || '';
+    $('#trigDevUnit').textContent = unit;
+    if (hintEl) hintEl.textContent = 'A leitura é verificada a cada ~6 segundos; a cena dispara ao cruzar o limite.';
+    return;
+  }
+  const sl = SCENE_DATA.sensor_labels && SCENE_DATA.sensor_labels[code];
   if (isSensor(devId) && sl) {
     // sl = [nome, textoTrue, textoFalse]. Ex.: ["Porta","aberta","fechada"].
     stateSel.options[0].textContent = capitalize(sl[1]);   // on  -> estado True
@@ -997,11 +1073,14 @@ function collectScene() {
     const days = $$('#trigDays .day-chip.on').map(c => +c.dataset.day);
     trigger = { type: 'schedule', time: $('#trigTime').value, days };
   } else if (type === 'device') {
-    trigger = {
-      type: 'device', device: $('#trigDev').value,
-      code: $('#trigDevCode').value || 'switch_1',
-      state: $('#trigDevState').value,
-    };
+    const code = $('#trigDevCode').value || 'switch_1';
+    trigger = { type: 'device', device: $('#trigDev').value, code };
+    if (isReadingCode(code)) {
+      trigger.op = $('#trigDevOp').value;
+      trigger.threshold = +$('#trigDevThr').value;
+    } else {
+      trigger.state = $('#trigDevState').value;
+    }
   } else {
     trigger = { type: 'camera', camera: $('#trigCam').value, event: $('#trigEvent').value };
     const p = $('#trigPerson').value.trim();
@@ -1036,6 +1115,12 @@ let SH_LOADING = false;
 let SH_DEVICES = [];  // última lista carregada (usada por "acender/apagar tudo")
 
 const SH_KIND_ICON = { switch: '⏻', light: '💡', sensor: '🚪', hub: '⧉' };
+// Ícone do card. Sensor de temperatura/umidade ganha termômetro; os demais
+// sensores (porta, movimento) usam o ícone padrão do kind.
+function shIcon(d) {
+  if (d.kind === 'sensor' && (d.readings || []).includes('temperature')) return '🌡️';
+  return SH_KIND_ICON[d.kind] || '•';
+}
 // Nome padrão de uma tecla quando o usuário ainda não a renomeou.
 function chDefault(code, total, kind) {
   if (total <= 1) return kind === 'light' ? 'Luz' : 'Ligar';
@@ -1060,7 +1145,7 @@ function renderSmartHome(devs) {
     card.dataset.id = d.id;
     card.innerHTML = `
       <div class="sh-head">
-        <span class="sh-ic">${SH_KIND_ICON[d.kind] || '•'}</span>
+        <span class="sh-ic">${shIcon(d)}</span>
         <div class="sh-title">
           <div class="sh-name" title="Clique para renomear">${esc(d.name || '…' + d.id.slice(-4))}</div>
           <div class="sh-sub muted">${{ lan: 'Wi-Fi local', hub: 'Zigbee (Hub, local)', cloud: 'via nuvem' }[d.via] || d.via}
@@ -1102,6 +1187,13 @@ function renderDeviceBody(card, d, st) {
       const on = !!val;  // sl[1] = texto p/ true, sl[2] = texto p/ false
       rows.push(`<div class="sensor-row"><span>${esc(sl[0])}</span>
         <span class="sensor-val ${on ? 'alert' : 'ok'}">${esc(capitalize(on ? sl[1] : sl[2]))}</span></div>`);
+    }
+    // Leituras numéricas (temperatura, umidade). rl = [nome, unidade].
+    const rl = (SCENE_DATA.reading_labels) || {};
+    for (const [name, val] of Object.entries(st.readings || {})) {
+      const spec = rl[name] || [name, ''];
+      rows.push(`<div class="sensor-row"><span>${esc(spec[0])}</span>
+        <span class="sensor-val">${esc(String(val))}${esc(spec[1] || '')}</span></div>`);
     }
     if (st.battery != null) {
       rows.push(`<div class="sensor-row"><span>Bateria</span>
@@ -1338,36 +1430,100 @@ function netTag(d) {
   return '';
 }
 
-async function loadNetwork() {
-  $('#netLoading').hidden = false;
+let NET_LOADING = false;
+let NET_EDITING = false;
+async function loadNetwork(mode = 'cache') {
+  if (NET_LOADING || (mode === 'cache' && NET_EDITING)) return;
+  NET_LOADING = true;
+  if (mode !== 'cache') $('#netLoading').hidden = false;
   $('#netEmpty').hidden = true;
-  $('#netTable').hidden = true;
-  let devs = [];
-  try { devs = (await api('/api/network')).devices || []; }
-  catch { toast('Falha ao escanear a rede', 'err'); }
+  let data = { devices: [], events: [] };
+  const path = mode === 'full' ? '/api/network/analysis' : (mode === 'quick' ? '/api/network/scan' : '/api/network');
+  try { data = await api(path, mode === 'cache' ? undefined : { method: 'POST' }); }
+  catch { toast('Falha ao carregar a rede', 'err'); }
+  NET_LOADING = false;
+  const devs = data.devices || [];
   $('#netLoading').hidden = true;
-  $('#netCount').textContent = devs.length + ' dispositivo(s) na rede';
+  const online = devs.filter(d => d.online).length;
+  $('#netCount').textContent = `${online} online · ${devs.length} no inventário`;
   $('#netEmpty').hidden = devs.length > 0;
   $('#netTable').hidden = devs.length === 0;
   const body = $('#netBody'); body.innerHTML = '';
   for (const d of devs) {
-    const name = esc(d.hostname || d.advert || d.vendor || '—');
+    const name = esc(d.custom_name || d.hostname || d.advert || d.vendor || '—');
     const svc = (d.services || []).length
       ? (d.services || []).map(s => `<span class="svc-tag">${esc(s)}</span>`).join(' ')
       : '<span class="muted">—</span>';
     const tr = document.createElement('tr');
-    if (d.is_camera) tr.className = 'is-cam';
+    tr.className = (d.is_camera ? 'is-cam ' : '') + (!d.online ? 'is-offline' : '');
     tr.innerHTML = `
-      <td><b>${name}</b> ${netTag(d)}</td>
+      <td><b class="net-name" title="Clique para nomear">${name}</b> ${netTag(d)}
+        <button class="net-known ${d.known ? 'on' : ''}" title="${d.known ? 'Dispositivo conhecido' : 'Marcar como conhecido'}">✓</button></td>
       <td class="mono">${esc(d.ip)}</td>
       <td class="mono muted">${esc(d.mac || '—')}</td>
       <td>${esc(d.vendor || '—')}</td>
       <td class="svc-cell">${svc}</td>
-      <td><span class="net-state ${d.state === 'REACHABLE' ? 'on' : ''}">${STATE_LABEL[d.state] || esc(d.state.toLowerCase())}</span></td>`;
+      <td><span class="net-state ${d.online ? 'on' : ''}">${d.online ? (d.missed_scans ? `confirmando ${d.missed_scans}/3` : 'online') : 'offline'}</span></td>
+      <td class="muted">${fmtDateTime(d.last_seen)}</td>`;
+    const nameEl = tr.querySelector('.net-name');
+    nameEl.onclick = () => editNetName(d.mac, nameEl);
+    tr.querySelector('.net-known').onclick = async () => {
+      await api('/api/network/device', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mac: d.mac, known: !d.known }) });
+      loadNetwork();
+    };
     body.appendChild(tr);
   }
+  const evLabels = { new: 'Novo dispositivo', online: 'Entrou na rede', offline: 'Saiu da rede' };
+  const events = data.events || [];
+  $('#netEvents').innerHTML = events.length ? events.map(e => `
+    <div class="net-event ${esc(e.event)}"><span class="net-event-dot"></span>
+      <b>${evLabels[e.event] || esc(e.event)}</b> · ${esc(e.label || e.ip)}
+      <span class="muted">${fmtDateTime(e.ts)}</span></div>`).join('')
+    : '<span class="muted">Nenhuma mudança registrada ainda.</span>';
 }
-$('#btnNetScan').onclick = loadNetwork;
+
+// Mesmo comportamento da edição do nome das câmeras: edita dentro da tabela,
+// Enter confirma, Escape cancela e sair do campo salva.
+function editNetName(mac, el) {
+  const cur = el.textContent;
+  const input = document.createElement('input');
+  input.className = 'cam-name-input net-name-input';
+  input.value = cur === '—' ? '' : cur;
+  el.replaceChildren(input);
+  NET_EDITING = true;
+  input.focus(); input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const v = input.value.trim();
+    const changed = save && v && v !== cur;
+    el.textContent = changed ? v : cur;
+    el.onclick = () => editNetName(mac, el);
+    NET_EDITING = false;
+    if (changed) {
+      try {
+        await api('/api/network/device', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mac, name: v })
+        });
+        toast('Dispositivo renomeado para "' + v + '"', 'ok');
+        loadNetwork();
+      } catch (e) { toast('Falha ao renomear', 'err'); }
+    }
+  };
+  input.onclick = (e) => e.stopPropagation();
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+$('#btnNetScan').onclick = () => loadNetwork('quick');
+$('#btnNetAnalysis').onclick = () => loadNetwork('full');
+// Atualiza apenas a exibicao do cache; nao gera ping nem trafego de descoberta.
+setInterval(() => { if (VIEW === 'network') loadNetwork('cache'); }, 15000);
 
 /* ---------- Configurações (credenciais do .env) ---------- */
 let SETTINGS_FIELDS = [];

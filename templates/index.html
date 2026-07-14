@@ -206,18 +206,23 @@
     <section class="view" id="view-network" hidden>
       <div class="subbar">
         <span class="muted" id="netCount">—</span>
-        <button class="btn primary" id="btnNetScan">Reescanear</button>
+        <button class="btn" id="btnNetScan">Atualizar agora</button>
+        <button class="btn primary" id="btnNetAnalysis">Análise completa</button>
       </div>
       <div class="net-table-wrap">
         <table class="net-table" id="netTable">
           <thead><tr>
-            <th>Dispositivo</th><th>IP</th><th>MAC</th><th>Fabricante</th><th>Serviços</th><th>Estado</th>
+            <th>Dispositivo</th><th>IP</th><th>MAC</th><th>Fabricante</th><th>Serviços</th><th>Presença</th><th>Última vez</th>
           </tr></thead>
           <tbody id="netBody"></tbody>
         </table>
       </div>
       <div class="empty" id="netEmpty" hidden>Nenhum dispositivo encontrado.</div>
-      <div class="empty" id="netLoading" hidden>Escaneando a rede…</div>
+      <div class="empty" id="netLoading" hidden>Analisando a rede…</div>
+      <div class="net-events">
+        <h3>Atividade recente</h3>
+        <div id="netEvents" class="net-event-list"></div>
+      </div>
     </section>
 
     <!-- View: Configurações -->
@@ -312,13 +317,24 @@
           <label>Tecla / canal</label>
           <select id="trigDevCode"></select>
         </div>
-        <div class="scene-col">
+        <div class="scene-col" id="trigDevStateCol">
           <label>Quando</label>
           <select id="trigDevState">
             <option value="on">Ligar</option>
             <option value="off">Desligar</option>
             <option value="any_change">Mudar (liga ou desliga)</option>
           </select>
+        </div>
+        <div class="scene-col" id="trigDevThrCol" hidden>
+          <label>Quando</label>
+          <div class="scene-thr">
+            <select id="trigDevOp">
+              <option value="above">acima de</option>
+              <option value="below">abaixo de</option>
+            </select>
+            <input id="trigDevThr" type="number" step="0.5" value="30">
+            <span id="trigDevUnit" class="muted"></span>
+          </div>
         </div>
       </div>
       <p class="muted" id="trigDevHint" style="margin:6px 0 0">

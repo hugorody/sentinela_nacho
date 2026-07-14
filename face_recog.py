@@ -30,16 +30,68 @@ DEFAULT_YUNET = str(Path(__file__).with_name("models") / "face_detection_yunet_2
 DEFAULT_SFACE = str(Path(__file__).with_name("models") / "face_recognition_sface_2021dec.onnx")
 # Limiar de similaridade de cosseno recomendado pelo OpenCV para o SFace.
 SFACE_COSINE_THRESHOLD = 0.363
+SFACE_ID_MARGIN = 0.06  # vencedor precisa separar-se do segundo colocado
 
 # Qualidade minima para USAR um rosto em reconhecimento (cadastro/identificacao).
 # Rostos menores/borrados geram embeddings ruins e destroem o agrupamento.
 MIN_FACE_PX = 90        # menor lado da caixa do rosto, em pixels
 MIN_DET_SCORE = 0.65    # confianca minima da deteccao
+MIN_BLUR_SCORE = 45.0   # variancia do Laplaciano no rosto (baixo = borrado)
+MIN_BRIGHTNESS = 35.0
+MAX_BRIGHTNESS = 225.0
+MAX_ROLL_DEG = 25.0
 
 
 def good_quality(box, score, min_px=MIN_FACE_PX, min_score=MIN_DET_SCORE):
     """Rosto grande e nitido o bastante para reconhecimento confiavel?"""
     return min(box[2], box[3]) >= min_px and score >= min_score
+
+
+def quality_check(frame, face, min_px=MIN_FACE_PX, min_score=MIN_DET_SCORE):
+    """Avalia se o rosto serve para reconhecimento, com motivos auditaveis.
+
+    Alem do tamanho/confianca, rejeita desfoque, exposicao extrema e landmarks
+    incompatíveis com um rosto aproximadamente frontal.
+    """
+    box = face["box"]
+    reasons = []
+    if not good_quality(box, face.get("score", 1.0), min_px, min_score):
+        reasons.append("small_or_low_score")
+    if frame is None:
+        return not reasons, {"reasons": reasons}
+    x, y, w, h = box
+    H, W = frame.shape[:2]
+    crop = frame[max(0, y):min(H, y + h), max(0, x):min(W, x + w)]
+    if crop.size == 0:
+        reasons.append("empty")
+        return False, {"reasons": reasons}
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    blur = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    brightness = float(np.mean(gray))
+    if blur < MIN_BLUR_SCORE:
+        reasons.append("blur")
+    if brightness < MIN_BRIGHTNESS or brightness > MAX_BRIGHTNESS:
+        reasons.append("exposure")
+
+    row = face.get("row")
+    roll = 0.0
+    if row is not None and len(row) >= 14 and w > 0 and h > 0:
+        pts = np.asarray(row[4:14], dtype=np.float32).reshape(5, 2)
+        left_eye, right_eye, nose, mouth_l, mouth_r = pts
+        eye_dx = float(right_eye[0] - left_eye[0])
+        eye_dy = float(right_eye[1] - left_eye[1])
+        roll = abs(float(np.degrees(np.arctan2(eye_dy, eye_dx))))
+        eye_span = abs(eye_dx) / w
+        nose_x = (nose[0] - x) / w
+        eye_y = ((left_eye[1] + right_eye[1]) * 0.5 - y) / h
+        mouth_y = ((mouth_l[1] + mouth_r[1]) * 0.5 - y) / h
+        if (roll > MAX_ROLL_DEG or eye_span < 0.20 or not 0.25 <= nose_x <= 0.75
+                or not 0.15 <= eye_y <= 0.65 or mouth_y <= eye_y + 0.12):
+            reasons.append("pose")
+    return not reasons, {
+        "reasons": reasons, "blur": round(blur, 1),
+        "brightness": round(brightness, 1), "roll": round(roll, 1),
+    }
 
 
 def cuda_available():
@@ -142,8 +194,8 @@ class HistoryLogger:
             return 0
 
         # So guarda rostos com qualidade suficiente para nomear/reconhecer.
-        valid = [f for f in faces
-                 if good_quality(f["box"], f.get("score", 1.0), self.min_size, self.min_score)]
+        valid = [f for f in faces if quality_check(
+            frame, f, self.min_size, self.min_score)[0]]
         if not valid:
             return 0
 
@@ -263,15 +315,27 @@ class KnownFaces:
         if m != self._mtime:
             self.load()
 
-    def identify(self, embedding, threshold=SFACE_COSINE_THRESHOLD):
-        """Retorna (nome, similaridade) do melhor match, ou (None, sim) se abaixo."""
+    def identify(self, embedding, threshold=SFACE_COSINE_THRESHOLD,
+                 min_margin=SFACE_ID_MARGIN):
+        """Compara por pessoa usando as 3 melhores amostras, não um único máximo.
+
+        O máximo entre muitas imagens favorece falsos positivos. A média das
+        melhores amostras e a margem para o segundo colocado tornam a decisão
+        conservadora quando duas pessoas têm resultados parecidos.
+        """
         if self.embeddings is None or len(self.names) == 0:
             return (None, 0.0)
         sims = cosine_sim(embedding, self.embeddings)
-        idx = int(np.argmax(sims))
-        best = float(sims[idx])
-        if best >= threshold:
-            return (self.names[idx], best)
+        scores = []
+        for name in sorted(set(self.names)):
+            vals = np.asarray([s for s, n in zip(sims, self.names) if n == name])
+            k = min(3, len(vals))
+            scores.append((float(np.mean(np.sort(vals)[-k:])), name))
+        scores.sort(reverse=True)
+        best, name = scores[0]
+        second = scores[1][0] if len(scores) > 1 else -1.0
+        if best >= threshold and best - second >= min_margin:
+            return (name, best)
         return (None, best)
 
 
@@ -289,6 +353,13 @@ def enroll_from_labels(outdir, known_path=None, detector=None, recognizer=None,
     if not labels_path.exists():
         return {"people": {}, "total": 0, "path": str(known_path)}
     labels = json.loads(labels_path.read_text(encoding="utf-8"))
+    # Animais/objetos podem receber nomes no painel, mas não devem contaminar o
+    # embedding de rostos humanos. A lista é local e mantém os rótulos intactos.
+    non_human_path = outdir / "non_human.json"
+    try:
+        non_human = set(json.loads(non_human_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        non_human = set()
 
     # Qualidade original de cada recorte (box/score do momento da captura).
     hist = {}
@@ -314,7 +385,7 @@ def enroll_from_labels(outdir, known_path=None, detector=None, recognizer=None,
     skipped_quality = []
     for file, name in labels.items():
         name = (name or "").strip()
-        if not name:
+        if not name or name in non_human:
             continue
         # Filtro de qualidade pelo tamanho/score originais, quando disponiveis.
         h = hist.get(file)
@@ -331,19 +402,55 @@ def enroll_from_labels(outdir, known_path=None, detector=None, recognizer=None,
             continue
         # Usa o maior rosto do recorte.
         d = max(dets, key=lambda r: r["box"][2] * r["box"][3])
+        ok_quality, metrics = quality_check(img, d, min_px=55, min_score=0.3)
+        if not ok_quality:
+            skipped_quality.append(file)
+            continue
         try:
             emb = recognizer.embed(img, d["row"])
         except Exception:
             skipped.append(file)
             continue
-        faces.append({"name": name, "file": file, "embedding": emb.tolist()})
-        people[name] = people.get(name, 0) + 1
+        faces.append({"name": name, "file": file, "embedding": emb.tolist(),
+                      "quality": metrics})
+
+    # Limpa cada identidade por consistencia interna. Amostras isoladas que não
+    # se parecem com nenhuma outra da mesma pessoa costumam ser perfil extremo,
+    # falso detector ou rótulo incorreto. Também limita o efeito de dezenas de
+    # templates, conservando as 15 amostras mais representativas.
+    cleaned, skipped_outlier = [], []
+    grouped = collections.defaultdict(list)
+    for item in faces:
+        grouped[item["name"]].append(item)
+    for name, items in grouped.items():
+        if len(items) < 3:
+            kept = items
+        else:
+            embs = np.asarray([i["embedding"] for i in items], dtype=np.float32)
+            norms = np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8
+            sims = (embs / norms) @ (embs / norms).T
+            support = []
+            for i in range(len(items)):
+                others = np.delete(sims[i], i)
+                k = min(3, len(others))
+                support.append(float(np.mean(np.sort(others)[-k:])))
+            med = float(np.median(support))
+            mad = float(np.median(np.abs(np.asarray(support) - med)))
+            cutoff = max(0.15, med - 2.5 * max(mad, 0.02))
+            ranked = sorted(zip(support, items), key=lambda p: p[0], reverse=True)
+            kept = [item for score, item in ranked if score >= cutoff][:15]
+            rejected = [item for item in items if item not in kept]
+            skipped_outlier.extend(item["file"] for item in rejected)
+        cleaned.extend(kept)
+        people[name] = len(kept)
+    faces = cleaned
 
     known_path.parent.mkdir(parents=True, exist_ok=True)
     known_path.write_text(json.dumps({"faces": faces}, ensure_ascii=False, indent=2),
                           encoding="utf-8")
     return {"people": people, "total": len(faces), "path": str(known_path),
-            "skipped_quality": skipped_quality, "skipped": skipped}
+            "skipped_quality": skipped_quality, "skipped_outlier": skipped_outlier,
+            "skipped": skipped}
 
 
 # --- Agrupamento automatico (clustering) ----------------------------------

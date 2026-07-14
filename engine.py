@@ -341,6 +341,7 @@ class Engine:
             "status": "parada",
             "frame": None,
             "faces": [],
+            "face_tracks": [],
             "face_size": None,
             "next_face": 0.0,
             "record": self.record_all,   # grava desde o inicio se ligado global
@@ -424,8 +425,8 @@ class Engine:
                 except Exception:
                     faces = []
                 for f in faces:
-                    # So identifica rostos de qualidade (evita embeddings-lixo).
-                    f["good"] = face_recog.good_quality(f["box"], f.get("score", 1.0))
+                    # Qualidade real: tamanho, foco, exposição e pose/landmarks.
+                    f["good"], f["quality"] = face_recog.quality_check(frame, f)
                     if (self.recognizer is not None and self.known is not None
                             and f["good"]):
                         try:
@@ -433,8 +434,9 @@ class Engine:
                             name, sim = self.known.identify(emb, self.face_threshold)
                         except Exception:
                             name, sim = None, 0.0
-                        f["name"] = name
+                        f["_candidate"] = name or "__unknown__"
                         f["match"] = sim
+                _stabilize_faces(cam, faces, confirmations=2)
                 cam["faces"] = faces
                 cam["face_size"] = (frame.shape[1], frame.shape[0])
 
@@ -589,6 +591,43 @@ class Engine:
 def _host_of(url):
     m = re.search(r"@([^:/]+)", url or "")
     return m.group(1) if m else None
+
+
+def _box_iou(a, b):
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    x0, y0, x1, y1 = max(ax, bx), max(ay, by), min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    inter = max(0, x1 - x0) * max(0, y1 - y0)
+    return inter / float(aw * ah + bw * bh - inter + 1e-8)
+
+
+def _stabilize_faces(cam, faces, confirmations=2):
+    """Exige a mesma decisão em quadros consecutivos para cada rosto rastreado."""
+    previous = cam.get("face_tracks") or []
+    used = set()
+    current = []
+    for face in faces:
+        candidate = face.pop("_candidate", None)
+        if candidate is None:
+            continue
+        best_i, best_iou = None, 0.0
+        for i, track in enumerate(previous):
+            if i in used:
+                continue
+            overlap = _box_iou(face["box"], track["box"])
+            if overlap > best_iou:
+                best_i, best_iou = i, overlap
+        old = previous[best_i] if best_i is not None and best_iou >= 0.20 else None
+        if old and old["candidate"] == candidate:
+            count = old["count"] + 1
+            used.add(best_i)
+        else:
+            count = 1
+        current.append({"box": face["box"], "candidate": candidate, "count": count})
+        face["confirmations"] = min(count, confirmations)
+        if count >= confirmations:
+            face["name"] = None if candidate == "__unknown__" else candidate
+    cam["face_tracks"] = current
 
 
 def _draw_faces(frame, faces, face_size):
