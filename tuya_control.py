@@ -41,6 +41,7 @@ _CATEGORY_KIND = {
     "dd": "light",    # fita de LED
     "dj": "light",    # lampada
     "mcs": "sensor",  # sensor de porta/janela
+    "wsdcg": "sensor",  # sensor de temperatura e umidade
     "wg2": "hub",     # gateway Zigbee (sem controle proprio)
 }
 
@@ -57,6 +58,34 @@ SENSOR_LABELS = {
     "watersensor_state": ("Vazamento", "detectado", "seco"),
     "smoke_sensor_status": ("Fumaça", "detectada", "normal"),
     "temper_alarm": ("Violação", "acionada", "normal"),
+}
+
+# Leituras NUMERICAS de sensores (temperatura, umidade). Diferente dos sensores
+# booleanos acima, sao valores continuos: viram o campo "readings" do estado
+# (nao "switches") e servem de gatilho por LIMITE, nao por transicao.
+#
+# Mapeamos por code de nuvem e por DP local. 'scale' e a casa decimal implicita
+# do Tuya (valor_real = valor_bruto / 10**scale). Este produto (wsdcg) usa
+# scale=0 (valores diretos), confirmado pela specification da nuvem; outros
+# modelos usam scale=1 (ex.: 205 -> 20.5 C).
+# (reading, unidade, scale, rotulo).
+_READING_SPEC = {
+    "va_temperature": ("temperature", "°C", 0, "Temperatura"),
+    "va_humidity":    ("humidity", "%", 0, "Umidade"),
+    "temp_current":   ("temperature", "°C", 1, "Temperatura"),
+    "humidity_value": ("humidity", "%", 0, "Umidade"),
+}
+# DP local (via Hub) -> mesmo destino que os codes de nuvem acima. Confirmado
+# lendo o sensor: DP 101=umidade, 103=temperatura (102=bateria, tratado a parte).
+_READING_DP = {
+    "101": ("humidity", "%", 0, "Umidade"),
+    "103": ("temperature", "°C", 0, "Temperatura"),
+}
+
+# Rotulos amigaveis das leituras numericas (reading -> (nome, unidade)).
+READING_LABELS = {
+    "temperature": ("Temperatura", "°C"),
+    "humidity": ("Umidade", "%"),
 }
 
 # DPs usados no controle LAN de luzes (protocolo local nao usa os 'codes' da
@@ -265,9 +294,19 @@ class Controller:
                 # observable = pode ser GATILHO de cena (estado observavel).
                 # Sensores entram aqui mesmo sem serem controlaveis.
                 "observable": kind in ("switch", "light", "sensor"),
+                # readings = leituras numericas que o sensor oferece (temperatura,
+                # umidade). Vazio para quem so tem estados booleanos.
+                "readings": self._reading_names(d),
                 "labels": dict(self._labels.get(d.get("id"), {})),
             })
         return out
+
+    @staticmethod
+    def _reading_names(dev):
+        """Leituras numericas que um dispositivo oferece, pela categoria."""
+        if dev.get("category") == "wsdcg":
+            return ["temperature", "humidity"]
+        return []
 
     # --- leitura de estado --------------------------------------------------
 
@@ -302,7 +341,7 @@ class Controller:
         dps = st.get("dps")
         if not isinstance(dps, dict):
             return {"online": False, "error": st.get("Error", "sem resposta")}
-        switches, battery = {}, None
+        switches, readings, battery = {}, {}, None
         kind = self._kind(dev)
         for dp, val in dps.items():
             if isinstance(val, bool):
@@ -312,9 +351,18 @@ class Controller:
                         switches["doorcontact_state"] = val
                 else:
                     switches[f"switch_{dp}"] = val
-            elif dp in ("3", "4") and kind == "sensor" and isinstance(val, (int, float)):
-                battery = int(val)  # muitos sensores Zigbee reportam bateria no DP 3/4
+            elif kind == "sensor" and isinstance(val, (int, float)):
+                spec = _READING_DP.get(dp)
+                if spec:
+                    name, unit, scale, _ = spec
+                    readings[name] = round(val / (10 ** scale), 1 if scale else 0)
+                elif dp in ("2", "3", "4", "102"):
+                    # Bateria: sensor de porta reporta no DP 3/4; o de
+                    # temperatura/umidade no DP 102.
+                    battery = int(val)
         out = {"online": True, "switches": switches, "brightness": None}
+        if readings:
+            out["readings"] = readings
         if battery is not None:
             out["battery"] = battery
         return out
@@ -349,15 +397,19 @@ class Controller:
         # switch_backlight (luz de fundo do interruptor) e switch_inching nao
         # sao teclas de carga; ignoramos para nao virarem botoes falsos.
         _NOT_LOAD = {"switch_backlight", "switch_inching"}
-        switches, bright, battery = {}, None, None
+        switches, readings, bright, battery = {}, {}, None, None
         for item in r.get("result", []):
             code, val = item.get("code", ""), item.get("value")
-            if code in ("battery_percentage", "battery_state") and isinstance(val, (int, float)):
+            if code in ("battery_percentage", "battery_state", "va_battery") \
+                    and isinstance(val, (int, float)):
                 battery = int(val)
                 continue
             if not isinstance(val, bool):
                 if code in ("bright_value", "bright_value_v2") and isinstance(val, (int, float)):
                     bright = self._raw_to_pct(val)
+                elif code in _READING_SPEC and isinstance(val, (int, float)):
+                    name, unit, scale, _ = _READING_SPEC[code]
+                    readings[name] = round(val / (10 ** scale), 1 if scale else 0)
                 continue
             if code in _NOT_LOAD:
                 continue
@@ -367,6 +419,8 @@ class Controller:
             if code.startswith("switch") or code in _SENSOR_CODES:
                 switches[code] = val
         st = {"online": True, "switches": switches, "brightness": bright}
+        if readings:
+            st["readings"] = readings
         if battery is not None:
             st["battery"] = battery
         return st

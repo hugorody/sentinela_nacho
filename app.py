@@ -26,6 +26,7 @@ import face_panel
 import face_recog
 import network_monitor
 import scenes as scenes_mod
+import smartthings_control
 import tuya_control
 import tuya_scan
 import tuya_setup
@@ -146,6 +147,12 @@ SETTINGS_FIELDS = [
         "help": "Access Secret (Client Secret) do seu projeto Tuya, ao lado do "
                 "Access ID na aba Overview de platform.tuya.com. Mantenha em "
                 "segredo.",
+    },
+    {
+        "key": "smartthings_token", "label": "SmartThings · Token", "secret": True,
+        "group": "Smart home (Samsung TVs)",
+        "help": "Token da conta SmartThings com permissão para listar, consultar e "
+                "controlar dispositivos. Permanece somente no backend.",
     },
 ]
 
@@ -433,6 +440,33 @@ def api_smarthome_all():
     return jsonify(TUYA.set_all(bool(data.get("on"))))
 
 
+@app.get("/api/smartthings/tvs")
+def api_smartthings_tvs():
+    try:
+        return jsonify({"configured": True, "tvs": smartthings_control.Controller().list_tvs()})
+    except smartthings_control.SmartThingsError as exc:
+        return jsonify({"configured": False, "error": str(exc), "tvs": []}), 400
+
+
+@app.get("/api/smartthings/tv/state/<path:name>")
+def api_smartthings_tv_state(name):
+    try:
+        return jsonify(smartthings_control.Controller().status(name))
+    except smartthings_control.SmartThingsError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/smartthings/tv/command")
+def api_smartthings_tv_command():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        result = smartthings_control.Controller().command(
+            data.get("tv"), data.get("action"), data.get("value"))
+        return jsonify(result), (200 if result.get("ok") else 502)
+    except (smartthings_control.SmartThingsError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.post("/api/smarthome/label")
 def api_smarthome_label():
     """Renomeia uma tecla/canal de um dispositivo (ex.: 'switch_1' -> 'Pia')."""
@@ -457,12 +491,14 @@ def api_alarms():
     if TUYA is not None:
         for d in TUYA.list_devices():
             if d.get("kind") == "sensor":
-                sensors.append({"id": d["id"], "name": d.get("name") or d["id"]})
+                sensors.append({"id": d["id"], "name": d.get("name") or d["id"],
+                                "readings": d.get("readings") or []})
     return jsonify({
         "config": cfg,
         "cameras": cams,
         "sensors": sensors,
         "sensor_labels": tuya_control.SENSOR_LABELS,
+        "reading_labels": tuya_control.READING_LABELS,
         "smart_ready": TUYA is not None,
     })
 
@@ -509,6 +545,8 @@ def api_alarms_device():
         windows=data.get("windows"),
         recipients=data.get("recipients"),
         trigger=data.get("trigger"),
+        op=data.get("op"),
+        threshold=data.get("threshold"),
     )
     return jsonify({"ok": ok, "config": ENGINE.alarms.get_config()})
 
@@ -536,6 +574,8 @@ def api_scenes():
         "smart_ready": TUYA is not None,
         # Rotulos dos estados de sensor (code -> [nome, textoLigado, textoDesligado]).
         "sensor_labels": tuya_control.SENSOR_LABELS,
+        # Rotulos das leituras numericas (reading -> [nome, unidade]).
+        "reading_labels": tuya_control.READING_LABELS,
     })
 
 

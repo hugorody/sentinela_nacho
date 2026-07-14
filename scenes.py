@@ -16,6 +16,10 @@ Uma CENA liga um GATILHO a uma ou mais ACOES:
                    trigger = {type:"device", device:"<id>", code:"switch_1",
                               state:"on"|"off"|"any_change" }
                    Dispara na TRANSICAO (o estado e lido por polling, ~6s).
+                   Sensor NUMERICO (temperatura/umidade): code
+                   "reading:temperature"|"reading:humidity" com
+                   op:"above"|"below" e threshold:<valor>. Dispara quando a
+                   leitura cruza o limite; re-arma quando volta com folga.
 
   Acoes (action.type):
     * "switch"     - liga/desliga uma tecla de um dispositivo.
@@ -262,7 +266,8 @@ class SceneManager:
         device_ids = {s["trigger"].get("device") for s in dev_scenes
                       if s["trigger"].get("device")}
 
-        # Le o estado de cada dispositivo uma unica vez.
+        # Le o estado de cada dispositivo uma unica vez (estados booleanos e
+        # leituras numericas).
         states = {}
         for dev_id in device_ids:
             try:
@@ -270,14 +275,21 @@ class SceneManager:
             except Exception:
                 st = {}
             if st.get("online"):
-                states[dev_id] = st.get("switches") or {}
+                states[dev_id] = (st.get("switches") or {}, st.get("readings") or {})
 
         for s in dev_scenes:
             t = s["trigger"]
             dev_id, code = t.get("device"), t.get("code", "switch_1")
-            switches = states.get(dev_id)
-            if switches is None or code not in switches:
-                continue  # offline ou sem essa tecla neste ciclo
+            snap = states.get(dev_id)
+            if snap is None:
+                continue  # offline neste ciclo
+            switches, readings = snap
+            if isinstance(code, str) and code.startswith("reading:"):
+                if self._reading_crossed(dev_id, code, t, readings):
+                    self._run_actions(s)
+                continue
+            if code not in switches:
+                continue  # sem essa tecla neste ciclo
             cur = bool(switches[code])
             key = (dev_id, code)
             prev = self._dev_state.get(key)
@@ -290,6 +302,34 @@ class SceneManager:
             if want == "off" and cur:
                 continue
             self._run_actions(s)
+
+    # margem para re-armar o gatilho numerico (ver _READING_HYST em alarms.py).
+    _READING_HYST = 1.0
+
+    def _reading_crossed(self, dev_id, code, trigger, readings):
+        """True quando uma leitura numerica CRUZA o limite (borda). So dispara de
+        novo depois que o valor volta com folga, evitando re-disparo continuo."""
+        reading = code.split(":", 1)[1]
+        if reading not in readings:
+            return False
+        try:
+            value = float(readings[reading])
+        except (TypeError, ValueError):
+            return False
+        op = trigger.get("op", "above")
+        thr = float(trigger.get("threshold", 0))
+        breached = value > thr if op == "above" else value < thr
+        key = (dev_id, code)
+        armed = self._dev_state.get(key, True)
+        if armed and breached:
+            self._dev_state[key] = False  # desarma ate o valor voltar com folga
+            return True
+        if not armed:
+            clear = (value <= thr - self._READING_HYST) if op == "above" \
+                else (value >= thr + self._READING_HYST)
+            if clear:
+                self._dev_state[key] = True
+        return False
 
     # ---- log ----
 

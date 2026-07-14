@@ -118,6 +118,14 @@ Integração de voz e consultas implementada na etapa seguinte:
 - WebRTC pela interface unificada `/v1/realtime/calls` da OpenAI.
 - A chave `openai_api_key` é lida apenas no backend; o navegador envia ao Nacho
   somente a oferta SDP e recebe a resposta SDP.
+- O Nacho também pode executar `set_smart_device_power` para ligar ou desligar
+  luzes e interruptores pelo endpoint já existente do Sentinela. A resolução
+  aceita nome do dispositivo ou rótulo da tecla, prioriza nomes exatos, rejeita
+  ambiguidades e impede comandos para sensores/dispositivos não controláveis.
+- A integração SmartThings é restrita a TVs e usa `smartthings_token` no
+  backend. Descobre aparelhos pelas categorias/capacidades de televisão e
+  permite ao Nacho consultar estado, ligar/desligar, ajustar volume e mudo;
+  cada comando só é enviado quando a TV anuncia a capability correspondente.
 - Modelo configurável por `nacho_realtime_model`, padrão `gpt-realtime-2.1`.
 - Voz configurável por `nacho_voice`, padrão `marin`.
 - PIN opcional `nacho_pin` protegido com HTTP Basic; não adiciona controles à

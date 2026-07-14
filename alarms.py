@@ -18,6 +18,13 @@ Cada camera tem uma config independente em alarms.json:
           "windows": [{"start": "22:00", "end": "06:00"}],
           "recipients": "extra@exemplo.com",  # opcional
           "trigger": "on"                # "on" (default), "off" ou "any"
+        },
+        "<device_id>|reading:temperature": {  # sensor NUMERICO (temp/umidade)
+          "enabled": true,
+          "windows": [],
+          "recipients": "",
+          "op": "above",                 # "above" ou "below"
+          "threshold": 30                # dispara quando cruza este valor
         }
       }
     }
@@ -174,23 +181,45 @@ class AlarmManager:
         """Chave que identifica um (dispositivo, estado) na config/estado."""
         return f"{device_id}|{code}"
 
+    @staticmethod
+    def _is_reading_code(code):
+        """True se o code aponta uma leitura NUMERICA (ex.: 'reading:temperature'),
+        e nao um estado booleano (ex.: 'doorcontact_state')."""
+        return isinstance(code, str) and code.startswith("reading:")
+
     def set_device(self, device_id, code, enabled=None, windows=None,
-                   recipients=None, trigger=None):
-        """Atualiza a config de alarme de um sensor (so os campos passados)."""
+                   recipients=None, trigger=None, op=None, threshold=None):
+        """Atualiza a config de alarme de um sensor (so os campos passados).
+
+        Sensores booleanos (porta, movimento) usam 'trigger' (on/off/any).
+        Sensores numericos (code 'reading:temperature'/'reading:humidity') usam
+        'op' ('above'/'below') e 'threshold' (o limite que dispara o alarme)."""
         if not device_id or not code:
             return False
         key = self._dev_key(device_id, code)
+        numeric = self._is_reading_code(code)
         with self._lock:
-            dev = self._cfg["devices"].setdefault(key, {
-                "enabled": False, "windows": [], "recipients": "",
-                "trigger": "on"})
+            default = {"enabled": False, "windows": [], "recipients": ""}
+            if numeric:
+                default.update({"op": "above", "threshold": 30})
+            else:
+                default["trigger"] = "on"
+            dev = self._cfg["devices"].setdefault(key, default)
             if enabled is not None:
                 dev["enabled"] = bool(enabled)
             if windows is not None:
                 dev["windows"] = self._clean_windows(windows)
             if recipients is not None:
                 dev["recipients"] = (recipients or "").strip()
-            if trigger is not None and trigger in ("on", "off", "any"):
+            if numeric:
+                if op is not None and op in ("above", "below"):
+                    dev["op"] = op
+                if threshold is not None:
+                    try:
+                        dev["threshold"] = float(threshold)
+                    except (TypeError, ValueError):
+                        pass
+            elif trigger is not None and trigger in ("on", "off", "any"):
                 dev["trigger"] = trigger
             self._save()
         return True
@@ -366,7 +395,8 @@ class AlarmManager:
         if not active:
             return
         # Um sensor pode ter varios 'codes' com alarme; leia cada dispositivo uma
-        # vez so.
+        # vez so. Guardamos tanto os estados booleanos (switches) quanto as
+        # leituras numericas (readings) do mesmo aparelho.
         device_ids = {k.split("|", 1)[0] for k in active}
         states = {}
         for dev_id in device_ids:
@@ -375,14 +405,20 @@ class AlarmManager:
             except Exception:
                 st = {}
             if st.get("online"):
-                states[dev_id] = st.get("switches") or {}
+                states[dev_id] = (st.get("switches") or {}, st.get("readings") or {})
 
         now = time.time()
         for key, cfg in active.items():
             dev_id, code = key.split("|", 1)
-            switches = states.get(dev_id)
-            if switches is None or code not in switches:
-                continue  # offline ou sem esse estado neste ciclo
+            snap = states.get(dev_id)
+            if snap is None:
+                continue  # offline neste ciclo
+            switches, readings = snap
+            if self._is_reading_code(code):
+                self._check_reading(key, dev_id, code, cfg, readings, now)
+                continue
+            if code not in switches:
+                continue  # sem esse estado neste ciclo
             cur = bool(switches[code])
             prev = self._dev_state.get(key)
             self._dev_state[key] = cur
@@ -408,6 +444,65 @@ class AlarmManager:
                 args=(label, recipients, state_text),
                 daemon=True,
             ).start()
+
+    # margem (em unidades da leitura) para RE-ARMAR o alarme numerico: so
+    # dispara de novo depois que o valor voltar a cruzar o limite nessa folga.
+    # Evita e-mails repetidos quando o valor fica oscilando em torno do limite.
+    _READING_HYST = 1.0
+
+    def _check_reading(self, key, dev_id, code, cfg, readings, now):
+        """Alarme de leitura NUMERICA: dispara quando o valor cruza o limite
+        (above/below) e so re-arma quando volta com folga (_READING_HYST)."""
+        reading = code.split(":", 1)[1]
+        if reading not in readings:
+            return  # sem essa leitura neste ciclo
+        try:
+            value = float(readings[reading])
+        except (TypeError, ValueError):
+            return
+        op = cfg.get("op", "above")
+        thr = float(cfg.get("threshold", 0))
+        breached = value > thr if op == "above" else value < thr
+        # 'armed' = pronto para disparar. Comeca armado; desarma apos disparar e
+        # so re-arma quando o valor sai da zona de alarme com folga.
+        armed = self._dev_state.get(key, True)
+        if armed and breached:
+            if not self._device_active(cfg, datetime.now()):
+                return  # fora da janela de horario (mantem armado)
+            with self._lock:
+                if now - self._last_sent.get(key, 0.0) < self.cooldown:
+                    return
+                self._last_sent[key] = now
+            self._dev_state[key] = False  # desarma ate o valor voltar
+            recipients = self._recipients_from(cfg)
+            if not recipients:
+                return
+            label, state_text = self._reading_alarm_text(reading, op, thr, value)
+            threading.Thread(
+                target=self._send_device_email,
+                args=(label, recipients, state_text),
+                daemon=True,
+            ).start()
+        elif not armed:
+            # Re-arma quando o valor volta ao lado seguro com folga.
+            clear = (value <= thr - self._READING_HYST) if op == "above" \
+                else (value >= thr + self._READING_HYST)
+            if clear:
+                self._dev_state[key] = True
+
+    @staticmethod
+    def _reading_alarm_text(reading, op, thr, value):
+        """(nome, texto) do alarme de leitura. Ex.: ('Temperatura',
+        'acima de 30°C (agora 31.5°C)')."""
+        try:
+            import tuya_control
+            name, unit = tuya_control.READING_LABELS.get(reading, (reading, ""))
+        except Exception:
+            name, unit = reading, ""
+        rel = "acima de" if op == "above" else "abaixo de"
+        def fmt(v):
+            return ("%g" % v)
+        return name, f"{rel} {fmt(thr)}{unit} (agora {fmt(value)}{unit})"
 
     @staticmethod
     def _device_labels(code, value):

@@ -317,13 +317,24 @@
           <label>Tecla / canal</label>
           <select id="trigDevCode"></select>
         </div>
-        <div class="scene-col">
+        <div class="scene-col" id="trigDevStateCol">
           <label>Quando</label>
           <select id="trigDevState">
             <option value="on">Ligar</option>
             <option value="off">Desligar</option>
             <option value="any_change">Mudar (liga ou desliga)</option>
           </select>
+        </div>
+        <div class="scene-col" id="trigDevThrCol" hidden>
+          <label>Quando</label>
+          <div class="scene-thr">
+            <select id="trigDevOp">
+              <option value="above">acima de</option>
+              <option value="below">abaixo de</option>
+            </select>
+            <input id="trigDevThr" type="number" step="0.5" value="30">
+            <span id="trigDevUnit" class="muted"></span>
+          </div>
         </div>
       </div>
       <p class="muted" id="trigDevHint" style="margin:6px 0 0">

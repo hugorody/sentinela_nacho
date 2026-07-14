@@ -256,6 +256,16 @@ body {
 .alarm-trigger { display: flex; gap: 8px; }
 .alarm-trigger select { flex: 1; background: #0d1117; border: 1px solid var(--line); color: var(--fg);
   border-radius: 8px; padding: 8px 10px; font-size: 14px; color-scheme: dark; }
+/* Condição numérica (temperatura/umidade): op + limite + unidade, em linha. */
+.alarm-dev-cond { display: flex; gap: 8px; flex: 1; align-items: center; }
+.alarm-dev-cond select, .alarm-dev-cond input { background: #0d1117; border: 1px solid var(--line);
+  color: var(--fg); border-radius: 8px; padding: 8px 10px; font-size: 14px; color-scheme: dark; min-width: 0; }
+.alarm-dev-cond .alarm-dev-thr { width: 5.5em; }
+.alarm-unit { color: var(--muted); }
+.scene-thr { display: flex; gap: 6px; align-items: center; }
+.scene-thr select, .scene-thr input { background: #0d1117; border: 1px solid var(--line); color: var(--fg);
+  border-radius: 8px; padding: 8px 10px; font-size: 14px; color-scheme: dark; min-width: 0; }
+.scene-thr #trigDevThr { width: 5em; }
 
 /* --- Smart home --- */
 .sh-bar-actions { display: flex; gap: 8px; }
